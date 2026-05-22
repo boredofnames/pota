@@ -1,9 +1,10 @@
-import { $isComponent, $isMap } from '../constants.js'
+import { $isClass, $isComponent, $isMap } from '../constants.js'
 
 import {
 	emptyArray,
 	equals,
 	flatNoArray,
+	flatToArray,
 	getValue,
 	isArray,
 	isFunction,
@@ -17,21 +18,25 @@ import {
 // solid
 
 import { createReactiveSystem } from './solid.js'
+import { toDiff } from '../use/dom.js'
 
 const {
 	action,
 	asyncTracking,
 	batch,
+	catchError,
 	cleanup,
 	context,
 	createSuspenseContext,
 	derived,
 	effect,
+	listener,
 	memo,
 	on,
 	owned,
 	owner,
 	root,
+	Root,
 	runWithOwner,
 	signal,
 	syncEffect,
@@ -44,16 +49,19 @@ export {
 	action,
 	asyncTracking,
 	batch,
+	catchError,
 	cleanup,
 	context,
 	createSuspenseContext,
 	derived,
 	effect,
+	listener,
 	memo,
 	on,
 	owned,
 	owner,
 	root,
+	Root,
 	runWithOwner,
 	signal,
 	syncEffect,
@@ -107,7 +115,7 @@ export function withPrevValue(value, fn) {
 /**
  * Returns `true` when all derived has been resolved
  *
- * @template {ReturnType<import('./derived.d.ts').derived>} T
+ * @template {Derived<any>} T
  * @param {...T} args
  * @returns {boolean}
  */
@@ -122,6 +130,7 @@ export function isResolved(...args) {
  *   function that receives a `currentRunningEffect` that should be
  *   awaited for when wanting to run effects synchronously, that's it
  *   one effect after another.
+ * @returns {void}
  */
 export function asyncEffect(fn) {
 	/** @type {Promise<any>[]} */
@@ -148,7 +157,7 @@ export function asyncEffect(fn) {
  * to patch a signal array with data that comes from a server without
  * losing references to what its already there avoiding a store.
  *
- * @template {{ id?: string }[]} T
+ * @template {{ id?: string; [key: string]: any }[]} T
  * @param {T} initialValue
  * @param {SignalOptions<T>} [options]
  * @returns {SignalObject<T>}
@@ -180,32 +189,54 @@ export const microtask = fn => queueMicrotask(owned(fn))
 
 // MAP
 
-class Row {
-	runId
+class Row extends Root {
+	runId = 0
 	item
 	index
 	isDupe
-	disposer
 	nodes
-	indexSignal
-	_begin
-	_end
+	indexSignal = null
+	_begin = null
+	_end = null
+	_fn
+	reactiveIndex
 	constructor(item, index, fn, isDupe, reactiveIndex) {
+		// Row IS its own Root — no separate root() / Root allocation.
+		super(owner())
+
 		this.item = item
 		this.index = index
 		this.isDupe = isDupe
+		this._fn = fn
+		this.reactiveIndex = reactiveIndex
 
-		root(disposer => {
-			this.disposer = disposer
-			if (reactiveIndex) {
-				this.indexSignal = signal(index)
-				/** @type Children[] */
-				this.nodes = fn(item, this.indexSignal.read)
-			} else {
-				/** @type Children[] */
-				this.nodes = fn(item, index)
-			}
-		})
+		// Run init with `this` as the active owner so any
+		// effects/cleanups created inside attach to this Row.
+		runWithOwner(this, () => this.rowInit())
+	}
+	rowInit() {
+		if (this.reactiveIndex) {
+			this.indexSignal = signal(this.index)
+			/** @type JSX.Element[] */
+			this.nodes = this._fn(this.item, this.indexSignal.read)
+		} else {
+			/** @type JSX.Element[] */
+			this.nodes = this._fn(this.item, this.index)
+		}
+	}
+
+	// Default disposal path — also remove DOM nodes. Used by
+	// mapper.dispose(row) and by parent owner cascades.
+	dispose() {
+		this.remove()
+		super.dispose()
+	}
+
+	// mapper.clear() path — the parent has already detached all rows
+	// in one batch (toDiff fast-clear), so skip per-row remove() and
+	// just clean up reactivity.
+	disposeKeepingNodes() {
+		super.dispose()
 	}
 
 	updateIndex(index) {
@@ -217,7 +248,7 @@ class Row {
 		}
 	}
 	begin() {
-		if (!this._begin) {
+		if (this._begin === null) {
 			this.getBegin(this.nodes)
 		}
 		return this._begin
@@ -229,7 +260,7 @@ class Row {
 		this._begin = nodes
 	}
 	end() {
-		if (!this._end) {
+		if (this._end === null) {
 			this.getEnd(this.nodes)
 		}
 		return this._end
@@ -240,6 +271,7 @@ class Row {
 		}
 		this._end = nodes
 	}
+	/** @returns {DOMElement[]} */
 	nodesForRow() {
 		const begin = this.begin()
 		const end = this.end()
@@ -254,19 +286,38 @@ class Row {
 
 		return nodes
 	}
+	remove() {
+		this.nodesForRow().forEach(node => node.remove())
+	}
 }
 
 /**
  * Reactive Map
  *
- * @template T
- * @param {Each<T>} list
- * @param {(...args: unknown[]) => Children} callback
- * @param {boolean} [noSort]
- * @param {Children} [fallback]
- * @param {boolean} [reactiveIndex] - Make indices reactive signals
+ * @type {{
+ * 	<T>(
+ * 		list: Each<T>,
+ * 		callback: (item: T, index: () => number) => JSX.Element,
+ * 		noSort: boolean | undefined,
+ * 		fallback: JSX.Element | undefined,
+ * 		reactiveIndex: true,
+ * 	): (fn?: Function) => JSX.Element
+ * 	<T>(
+ * 		list: Each<T>,
+ * 		callback: (item: T, index: number) => JSX.Element,
+ * 		noSort?: boolean,
+ * 		fallback?: JSX.Element,
+ * 		reactiveIndex?: boolean,
+ * 	): (fn?: Function) => JSX.Element
+ * }}
  */
-export function map(list, callback, noSort, fallback, reactiveIndex) {
+export const map = (
+	list,
+	callback,
+	noSort,
+	fallback,
+	reactiveIndex,
+) => {
 	const cache = new Map()
 	const duplicates = new Map() // for when caching by value is not possible [1, 2, 1, 1, 1]
 
@@ -278,8 +329,10 @@ export function map(list, callback, noSort, fallback, reactiveIndex) {
 	let prev = []
 
 	function clear() {
+		toDiff(flatToArray(prev.map(item => item.nodes)), [], true)
+
 		for (const row of prev) {
-			row.disposer()
+			row.disposeKeepingNodes()
 		}
 		cache.clear()
 		duplicates.clear()
@@ -302,12 +355,12 @@ export function map(list, callback, noSort, fallback, reactiveIndex) {
 				: removeFromArray(arr, row)
 		}
 
-		row.disposer()
+		row.dispose()
 	}
 
 	/**
 	 * @param {Function} [fn]
-	 * @returns {Children}
+	 * @returns {JSX.Element}
 	 */
 	function mapper(fn) {
 		const cb = fn
@@ -316,15 +369,30 @@ export function map(list, callback, noSort, fallback, reactiveIndex) {
 
 		const value = getValue(list) || emptyArray
 
-		/** To allow iterate objects as if were an array with indexes */
-		const items = toEntries(value)
-
 		runId++
 
 		rows = []
+
+		/** `toEntries` To allow iterate objects as if were an array */
+
+		// all has been replaced?
+		if (prev.length) {
+			let clearit = true
+			for (const [index, item] of toEntries(value)) {
+				if (cache.get(item)) {
+					clearit = false
+					break
+				}
+			}
+
+			if (clearit) {
+				clear()
+			}
+		}
+
 		const hasPrev = prev.length
 
-		for (const [index, item] of items) {
+		for (const [index, item] of toEntries(value)) {
 			let row = hasPrev ? cache.get(item) : undefined
 
 			if (row === undefined) {
@@ -360,7 +428,12 @@ export function map(list, callback, noSort, fallback, reactiveIndex) {
 		if (rows.length === 0) {
 			hasPrev && clear()
 			prev = rows
-			return fallback ? fn(fallback) : emptyArray
+			if (fallback) {
+				const f = fn(fallback)
+				cleanup(() => toDiff(flatToArray(f)))
+				return f
+			}
+			return emptyArray
 		}
 
 		// sort
@@ -377,50 +450,62 @@ export function map(list, callback, noSort, fallback, reactiveIndex) {
 			// `rows.length > 1` because no need for sorting when there are no items
 			// `prev.length > 0` to skip sorting on creation as its already sorted
 			if (!noSort && rows.length > 1 && prev.length) {
-				// when appending to already created it shouldnt sort
-				// as its already sorted
 				const unsort = []
+				const sorted = []
+
+				// handles append/prepend/insert in middle/swap
 				for (let i = 0; i < prev.length && i < rows.length; i++) {
 					if (prev[i] !== rows[i]) {
 						unsort.push(rows[i])
+						for (let i2 = 1; rows.length - i2 > i; i2++) {
+							const k = rows.length - i2
+							if (prev[prev.length - i2] !== rows[k]) {
+								unsort.push(rows[k])
+							} else {
+								sorted.push(rows[k])
+							}
+						}
+						break
+					} else {
+						sorted.push(rows[i])
 					}
 				}
 
 				if (unsort.length) {
 					let unsorted = unsort.length
 					if (unsorted) {
-						const sorted = []
-
-						// handle swap - unsorted rows should move only next to already sorted
-						for (const usort of unsort) {
-							if (
-								rows[usort.index - 1] &&
-								(!unsort.includes(rows[usort.index - 1]) ||
-									sorted.includes(rows[usort.index - 1]))
-							) {
-								rows[usort.index - 1]
-									.end()
-									.after(...usort.nodesForRow())
-								sorted.push(usort)
-								unsorted--
-							} else if (
-								rows[usort.index + 1] &&
-								(!unsort.includes(rows[usort.index + 1]) ||
-									sorted.includes(rows[usort.index - 1]))
-							) {
-								rows[usort.index + 1]
-									.begin()
-									.before(...usort.nodesForRow())
-								sorted.push(usort)
-								unsorted--
+						if (sorted.length) {
+							// handle swap - unsorted rows should move only next to already sorted
+							for (const usort of unsort) {
+								if (
+									rows[usort.index - 1] &&
+									(unsorted === 1 ||
+										!unsort.includes(rows[usort.index - 1]) ||
+										sorted.includes(rows[usort.index - 1]))
+								) {
+									rows[usort.index - 1]
+										.end()
+										.after(...usort.nodesForRow())
+									sorted.push(usort)
+									unsorted--
+								} else if (
+									rows[usort.index + 1] &&
+									(unsorted === 1 ||
+										!unsort.includes(rows[usort.index + 1]) ||
+										sorted.includes(rows[usort.index + 1]))
+								) {
+									rows[usort.index + 1]
+										.begin()
+										.before(...usort.nodesForRow())
+									sorted.push(usort)
+									unsorted--
+								}
 							}
 						}
-
 						if (unsorted) {
 							// handles all other cases
 							// best for any combination of: push/pop/shift/unshift/insertion/deletion
 							// must check in reverse as on creation stuff is added to the end
-
 							let current = rows[rows.length - 1]
 							for (let i = rows.length - 1; i > 0; i--) {
 								const previous = rows[i - 1]
@@ -451,23 +536,28 @@ export function map(list, callback, noSort, fallback, reactiveIndex) {
  * Resolves and returns `children` in a memo. A memo in a memo, so
  * reactivity on the inner memo doesnt trigger reactivity outside.
  *
- * @template {Children} T
+ * @template {JSX.Element} T
  * @param {T | (() => T)} fn
+ * @returns {SignalAccessor<Resolved<T>>}
  * @url https://pota.quack.uy/resolve
  */
 export function resolve(fn) {
-	const children = isFunction(fn) ? memo(fn) : () => fn
+	const children = isFunction(fn)
+		? memo(/** @type {() => T} */ (fn))
+		: () => fn
 	return memo(() => unwrap(children()))
 }
 
 /**
  * Recursively unwrap children functions
  *
- * @param {Children} children
+ * @template T
+ * @param {T} children
+ * @returns {Resolved<T>}
  */
-function unwrap(children) {
+export function unwrap(children) {
 	if (isFunction(children)) {
-		return unwrap(children())
+		return unwrap(/** @type {any} */ (children)())
 	}
 
 	if (isArray(children)) {
@@ -478,11 +568,35 @@ function unwrap(children) {
 				? childrens.push(...child)
 				: childrens.push(child)
 		}
-		return childrens
+		return /** @type {Resolved<T>} */ (childrens)
 	}
 
-	return children
+	return /** @type {Resolved<T>} */ (children)
 }
+/**
+ * Extend `Pota` and define a `render(){}` method to create a class
+ * component. `ready(cb)` and `cleanup(cb)` methods will be registered
+ * automatically.
+ *
+ * JSX props become `Partial<P>` via `JSX.LibraryManagedAttributes` —
+ * the renderer merges JSX props on top of the `props` field defaults
+ * (see `createClass` in `src/core/renderer.js`), so every individual
+ * JSX prop is optional at the call site. Inside `render()`, the
+ * parameter is the full `P`.
+ *
+ * @template {Record<string, unknown>} [P=Record<string, unknown>]
+ *   Default is `Record<string, unknown>`
+ * @url https://pota.quack.uy/Classes
+ */
+export class Pota {
+	/** @type {P} */
+	props
+	/** @param {P} props */
+	constructor(props) {}
+	/** @param {P} props */
+	render(props) {}
+}
+Pota[$isClass] = undefined
 
 /**
  * Returns true if the `value` is a `Component`
@@ -498,13 +612,25 @@ export const isComponent = value =>
  * non-reactive children will run untracked, regular children will
  * just return.
  *
- * @template {Children | Children[]} T
+ * @template {JSX.Element | JSX.Element[]} T
  * @param {T} children
  * @returns {(...args: unknown[]) => T}
  */
 export function makeCallback(children) {
 	/** Shortcut the most used case */
 	if (isFunction(children)) {
+		// JSX-component children (`<Inner />`) carry `$isComponent`. The
+		// renderer untracks marked functions when it inserts them as
+		// children, but flow components like `Show`/`Switch` invoke the
+		// callback themselves inside a memo, bypassing that path. Mirror
+		// the renderer's behavior here so the marked component runs
+		// untracked regardless of the call site.
+		// User callbacks (`{v => ...}`) are not marked and stay tracked.
+		if ($isComponent in children) {
+			return markComponent((...args) =>
+				untrack(() => children(...args)),
+			)
+		}
 		return markComponent(children)
 	}
 
@@ -517,12 +643,18 @@ export function makeCallback(children) {
 	return isArray(childrenMaybeArray)
 		? markComponent((...args) =>
 				childrenMaybeArray.map(child =>
-					isFunction(child) ? child(...args) : child,
+					isFunction(child)
+						? $isComponent in child
+							? untrack(() => child(...args))
+							: child(...args)
+						: child,
 				),
 			)
 		: markComponent((...args) =>
 				isFunction(childrenMaybeArray)
-					? childrenMaybeArray(...args)
+					? $isComponent in childrenMaybeArray
+						? untrack(() => childrenMaybeArray(...args))
+						: childrenMaybeArray(...args)
 					: childrenMaybeArray,
 			)
 }
@@ -544,11 +676,10 @@ export function markComponent(fn) {
  * Adds an event listener to a node
  *
  * @template {Document | typeof window | DOMElement} TargetElement
- * @template {keyof EventType} Name
+ * @template {JSX.EventName} Name
  * @param {TargetElement} node - Element to add the event listener
  * @param {Name} type - The name of the event listener
- * @param {EventHandler<EventType[Name], TargetElement>} handler
- *
+ * @param {JSX.EventHandler<JSX.EventTypeFor<Name>, TargetElement>} handler
  *   - Function to handle the event
  *
  * @returns {Function} - An `off` function for removing the event
@@ -562,7 +693,7 @@ export function addEvent(node, type, handler) {
 			/** @type unknown */ handler
 		),
 		!isFunction(handler)
-			? /** @type {EventHandlerOptions} */ (handler)
+			? /** @type {JSX.EventHandlerOptions} */ (handler)
 			: undefined,
 	)
 
@@ -582,11 +713,10 @@ export function addEvent(node, type, handler) {
  * Removes an event listener from a node
  *
  * @template {Document | typeof window | DOMElement} TargetElement
- * @template {keyof EventType} Name
+ * @template {JSX.EventName} Name
  * @param {TargetElement} node - Element to add the event listener
  * @param {Name} type - The name of the event listener
- * @param {EventHandler<EventType[Name], TargetElement>} handler
- *
+ * @param {JSX.EventHandler<JSX.EventTypeFor<Name>, TargetElement>} handler
  *   - Function to handle the event
  *
  * @returns {Function} - An `on` function for adding back the event
@@ -600,7 +730,7 @@ export function removeEvent(node, type, handler) {
 			/** @type unknown */ handler
 		),
 		!isFunction(handler)
-			? /** @type {EventHandlerOptions} */ (handler)
+			? /** @type {JSX.EventHandlerOptions} */ (handler)
 			: undefined,
 	)
 
@@ -611,7 +741,7 @@ export function removeEvent(node, type, handler) {
  * It gives a handler an owner, so stuff runs batched on it, and
  * things like context and cleanup work
  *
- * @template {EventHandler<Event, Element>} T
+ * @template {JSX.EventHandler<Event, Element>} T
  * @param {T} handler
  */
 export const ownedEvent = handler =>

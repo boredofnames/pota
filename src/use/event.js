@@ -41,36 +41,39 @@ export function stopEvent(e) {
  * @param {CustomEventInit} [data]
  */
 
-export const emit = (
-	node,
-	eventName,
-	data = { bubbles: true, cancelable: true, composed: true },
-) => node.dispatchEvent(new CustomEvent(eventName, data))
+export const emit = (node, eventName, data = {}) => {
+	;['bubbles', 'cancelable', 'composed'].forEach(item => {
+		if (!(item in data)) {
+			data[item] = true
+		}
+	})
 
-/**
- * Waits for an event to be dispatched and runs a callback
- *
- * @param {Element} element
- * @param {string} eventName
- */
-export const waitEvent = withState(
-	(state, element, eventName) =>
-		promise((resolve, reject) => {
-			/**
-			 * To prevent firing `transitionend` twice it needs to stop
-			 * listening the old one because maybe wasn't dispatched and
-			 * running a new transition will make it dispatch twice
-			 */
-			const previous = state.get(element, empty)
-			previous.reject && previous.reject()
-			element.removeEventListener(eventName, previous.resolve)
-			state.set(element, { resolve, reject })
-			element.addEventListener(eventName, resolve, {
-				once: true,
-			})
-		}),
-	weakStore,
-)
+	node.dispatchEvent(new CustomEvent(eventName, data))
+}
+
+/** Waits for an event to be dispatched and runs a callback */
+export const waitEvent =
+	/** @type {<K extends JSX.EventName>(element: Element, eventName: K) => Promise<JSX.EventTypeFor<K>>} */ (
+		withState(
+			(state, element, eventName) =>
+				promise((resolve, reject) => {
+					/**
+					 * To prevent firing `transitionend` twice it needs to
+					 * stop listening the old one because maybe wasn't
+					 * dispatched and running a new transition will make it
+					 * dispatch twice
+					 */
+					const previous = state.get(element, empty)
+					previous.reject && previous.reject()
+					element.removeEventListener(eventName, previous.resolve)
+					state.set(element, { resolve, reject })
+					element.addEventListener(eventName, resolve, {
+						once: true,
+					})
+				}),
+			weakStore,
+		)
+	)
 
 /**
  * Adds an event listener using the handler object itself as options.
@@ -87,7 +90,7 @@ export const addEventNative = (where, type, handler) =>
 			/** @type unknown */ handler
 		),
 		!isFunction(handler)
-			? /** @type {EventHandlerOptions} */ (handler)
+			? /** @type {JSX.EventHandlerOptions} */ (handler)
 			: undefined,
 	)
 
@@ -107,7 +110,7 @@ export const removeEventNative = (where, type, handler) =>
 			/** @type unknown */ handler
 		),
 		!isFunction(handler)
-			? /** @type {EventHandlerOptions} */ (handler)
+			? /** @type {JSX.EventHandlerOptions} */ (handler)
 			: undefined,
 	)
 

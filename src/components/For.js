@@ -9,22 +9,29 @@ import { makeCallback, map } from '../lib/reactive.js'
 import { onFixes } from '../core/scheduler.js'
 
 /**
- * Renders reactive values from an signal that returns an Iterable
+ * Renders reactive values from a signal that returns an Iterable
  * object
  *
- * @template T
- * @param {object} props
- * @param {Each<T>} props.each
- * @param {boolean} [props.restoreFocus] - If the focused element
- *   moves it may lose focus
- * @param {boolean} [props.reactiveIndex] - Make indices reactive
- *   signals
- * @param {(item: T, index: number) => Children} [props.children]
- * @param {Children} [props.fallback]
- * @returns {Children}
+ * @type {{
+ * 	<T>(props: {
+ * 		each: Each<T>
+ * 		restoreFocus?: boolean
+ * 		reactiveIndex?: false
+ * 		children?: Children<(item: T, index: number) => JSX.Element>
+ * 		fallback?: JSX.Element
+ * 	}): JSX.Element
+ * 	<T>(props: {
+ * 		each: Each<T>
+ * 		restoreFocus?: boolean
+ * 		reactiveIndex: true
+ * 		children?: Children<
+ * 			(item: T, index: () => number) => JSX.Element
+ * 		>
+ * 		fallback?: JSX.Element
+ * 	}): JSX.Element
+ * }}
  * @url https://pota.quack.uy/Components/For
  */
-
 export const For = props =>
 	map(
 		() => {
@@ -43,16 +50,18 @@ let queued
 // because re-ordering the elements trashes focus
 function queue() {
 	if (!queued) {
-		queued = true
-
 		const active = activeElement()
+		// nothing focused, nothing to restore — skip so the stale
+		// capture doesn't block the next meaningful queue() call
+		if (!active || active === document.body) return
+
+		queued = true
 		const scroll = documentElement.scrollTop
 
 		onFixes(() => {
 			queued = false
 			// re-ordering the elements trashes focus
-			active &&
-				active !== activeElement() &&
+			active !== activeElement() &&
 				isConnected(active) &&
 				// @ts-expect-error
 				active.focus()

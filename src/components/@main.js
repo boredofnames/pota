@@ -1,5 +1,6 @@
 export { Collapse } from './Collapse.js'
 export { Dynamic } from './Dynamic.js'
+export { Errored } from './Errored.js'
 export { For } from './For.js'
 export { Head } from './Head.js'
 export { Portal } from './Portal.js'
@@ -9,5 +10,6 @@ export { Show } from './Show.js'
 export { Suspense } from './Suspense.js'
 export { Match, Switch } from './Switch.js'
 export { Tabs } from './tabs/tabs.js'
+export { Normalize } from './Normalize.js'
 
 export { CustomElement, customElement } from './CustomElement.js'

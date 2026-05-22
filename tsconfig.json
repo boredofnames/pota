@@ -1,13 +1,13 @@
 {
 	"compilerOptions": {
 		"rootDir": "src",
-		"outDir": "types",
+		"outDir": "generated/types",
 
 		"declaration": true,
 		// helps to click "implementation" and go to the source code
 		"declarationMap": true,
 		"emitDeclarationOnly": true,
-		// "preserveWatchOutput": true,
+		"preserveWatchOutput": true,
 		"pretty": false,
 
 		"allowJs": true,
@@ -22,11 +22,23 @@
 		"module": "NodeNext",
 		"moduleResolution": "NodeNext",
 		"target": "ESNext",
-		"lib": ["ESNext", "DOM", "DOM.Iterable"],
+		"lib": ["ESNext", "DOM"],
 
 		"jsx": "preserve",
 		"jsxImportSource": "pota"
 	},
 	"include": ["src"],
-	"exclude": ["node_modules", "src/babel-preset", "src/release"]
+	// hand-maintained .d.ts files that src/ JSDoc needs for
+	// type-checking (ambient types like JSX, Accessor, Dynamic).
+	// These are outside "include" so tsc won't find them
+	// automatically — listing them here makes their types globally
+	// available to the checked source files. They are NOT emitted
+	// to generated/types/ (tsc skips .d.ts during emit).
+	"files": [
+		"typescript/public/components.d.ts",
+		"typescript/public/pota.d.ts",
+		"typescript/jsx/components.d.ts",
+		"typescript/jsx/namespace.d.ts"
+	],
+	"exclude": ["node_modules"]
 }

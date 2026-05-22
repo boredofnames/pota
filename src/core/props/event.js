@@ -4,17 +4,23 @@ import { flatForEach } from '../../lib/std.js'
 /**
  * Attaches event handlers (singular or array) to an element.
  *
- * @template {DOMElement} T
- * @param {T} node
- * @param {string} name
- * @param {EventHandlers<Event, T>} value
+ * @template {DOMElement} TargetElement
+ * @template {JSX.EventName} Name
+ * @param {TargetElement} node
+ * @param {Name} name
+ * @param {JSX.EventHandlers<
+ * 	JSX.EventTypeFor<Name>,
+ * 	TargetElement
+ * >} value
  */
 export const setEvent = (node, name, value) => {
 	flatForEach(value, value => {
 		addEvent(
 			node,
 			name,
-			ownedEvent(/** @type EventHandler<Event, Element> */ (value)),
+			ownedEvent(
+				/** @type JSX.EventHandler<Event, Element> */ (value),
+			),
 		)
 	})
 }
@@ -23,10 +29,14 @@ export const setEvent = (node, name, value) => {
  * Attaches namespaced event handlers, (singular or array) to an
  * element.
  *
- * @template {DOMElement} T
- * @param {T} node
- * @param {string} localName
- * @param {EventHandlers<Event, T>} value
+ * @template {DOMElement} TargetElement
+ * @template {JSX.EventName} Name
+ * @param {TargetElement} node
+ * @param {Name} localName
+ * @param {JSX.EventHandlers<
+ * 	JSX.EventTypeFor<Name>,
+ * 	TargetElement
+ * >} value
  */
 export const setEventNS = (node, localName, value) => {
 	flatForEach(value, value => {

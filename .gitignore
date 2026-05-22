@@ -1,9 +1,10 @@
 # generated
 
-types
-src/babel-preset/index.cjs
-src/release/importmap.json
-src/release/types.json
+generated
+
+# ai stuff
+
+settings.local.json
 
 # Logs
 logs
@@ -15,9 +16,13 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-dist
-dist-ssr
-*.local
+
+# ai
+
+.claude/settings.json
+.claude/settings.local.json
+
+.codex/*
 
 # Editor directories and files
 .vscode/*
@@ -31,3 +36,4 @@ dist-ssr
 *.sw?
 .zed/*
 tsconfig.tsbuildinfo
+

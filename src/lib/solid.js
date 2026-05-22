@@ -13,6 +13,8 @@ import {
 	walkParents,
 } from './std.js'
 
+import { $isDerived } from '../constants.js'
+
 /**
  * This is so far the core of Solid JS 1.x Reactivity, but ported to
  * classes and adapted to my taste.
@@ -32,8 +34,6 @@ import {
  *   developer tools context, so dev-tools context doesnt mess up the
  *   real context
  *
- * WARNING: typings here are a mess, Im slowly working on it.
- *
  * @url https://www.solidjs.com/
  * @url https://github.com/solidjs/solid
  * @url https://github.com/solidjs/signals
@@ -43,6 +43,13 @@ export function createReactiveSystem() {
 	const CLEAN = 0
 	const STALE = 1
 	const CHECK = 2
+
+	// Shared empty-array sentinel for `owned` / `cleanups` slots.
+	// Never mutated; addOwned/addCleanups replace it with a fresh
+	// array on first write. Stable JSArray slot type lets V8 skip
+	// the undefined/single/array polymorphism on the hot Root
+	// lifecycle methods.
+	const EMPTY = []
 
 	/** @type {undefined | Computation} */
 	let Owner
@@ -58,11 +65,20 @@ export function createReactiveSystem() {
 
 	let Time = 0
 
+	const errorHandlerId = Symbol()
+
+	function routeError(node, err) {
+		const handler = node.context && node.context[errorHandlerId]
+		if (handler) handler(err)
+		else console.error(err)
+	}
+
 	function doRead(o) {
 		if (Listener) {
-			const sourceSlot = o.observers ? o.observers.length : 0
+			const observers = o.observers
+			const sourceSlot = observers.length
 
-			if (Listener.sources) {
+			if (Listener.sources !== EMPTY) {
 				Listener.sources.push(o)
 				Listener.sourceSlots.push(sourceSlot)
 			} else {
@@ -72,28 +88,33 @@ export function createReactiveSystem() {
 
 			const observerSlot = Listener.sources.length - 1
 
-			if (sourceSlot) {
-				o.observers.push(Listener)
-				o.observerSlots.push(observerSlot)
-			} else {
+			if (observers === EMPTY) {
 				o.observers = [Listener]
 				o.observerSlots = [observerSlot]
+			} else {
+				observers.push(Listener)
+				o.observerSlots.push(observerSlot)
 			}
 		}
 	}
 
-	function doWrite(o) {
-		if (o.observers && o.observers.length) {
-			runUpdates(() => {
-				for (const observer of o.observers) {
-					if (observer.state === 0 /* CLEAN */) {
-						observer.queue()
-						observer.observers && downstream(observer)
-					}
+	let _writeTarget
 
-					observer.state = 1 /* STALE */
-				}
-			})
+	function _markObservers() {
+		for (const observer of _writeTarget) {
+			if (observer.state === 0 /* CLEAN */) {
+				observer.queue()
+				observer.observers && downstream(observer)
+			}
+
+			observer.state = 1 /* STALE */
+		}
+	}
+
+	function doWrite(o) {
+		if (o.observers.length) {
+			_writeTarget = o.observers
+			runUpdates(_markObservers)
 		}
 	}
 
@@ -103,18 +124,18 @@ export function createReactiveSystem() {
 		/** @type {undefined | Root} */
 		owner
 
-		/** @type {Computation | Computation[]} */
-		owned
+		/** @type {Computation[]} */
+		owned = EMPTY
 
-		/** @type {undefined | Function | Function[]} */
-		cleanups
+		/** @type {Function[]} */
+		cleanups = EMPTY
 
 		/** @type {Record<symbol, unknown>} */
 		context
 
 		/**
 		 * @param {Computation} owner
-		 * @param {object} [options]
+		 * @param {EffectOptions} [options]
 		 */
 		constructor(owner, options) {
 			if (owner) {
@@ -127,34 +148,19 @@ export function createReactiveSystem() {
 
 			options && assign(this, options)
 		}
-		/** @param {Function} fn */
+		/** @param {() => void} fn */
 		addCleanups(fn) {
-			if (!this.cleanups) {
-				this.cleanups = fn
-			} else if (isArray(this.cleanups)) {
-				this.cleanups.push(fn)
-			} else {
-				this.cleanups = [this.cleanups, fn]
-			}
+			if (this.cleanups === EMPTY) this.cleanups = [fn]
+			else this.cleanups.push(fn)
 		}
-		/** @param {Function} fn */
+		/** @param {() => void} fn */
 		cleanupCancel(fn) {
-			if (!this.cleanups) {
-			} else if (this.cleanups === fn) {
-				this.cleanups = undefined
-			} else if (isArray(this.cleanups)) {
-				removeFromArray(this.cleanups, fn)
-			}
+			if (this.cleanups !== EMPTY) removeFromArray(this.cleanups, fn)
 		}
 		/** @param {Computation} value */
 		addOwned(value) {
-			if (!this.owned) {
-				this.owned = value
-			} else if (isArray(this.owned)) {
-				this.owned.push(value)
-			} else {
-				this.owned = [this.owned, value]
-			}
+			if (this.owned === EMPTY) this.owned = [value]
+			else this.owned.push(value)
 		}
 
 		dispose() {
@@ -163,28 +169,26 @@ export function createReactiveSystem() {
 		}
 
 		disposeOwned() {
-			if (!this.owned) {
-			} else if (isArray(this.owned)) {
-				for (let i = this.owned.length - 1; i >= 0; i--) {
-					this.owned[i].dispose()
+			const owned = this.owned
+			if (owned.length) {
+				for (let i = owned.length - 1; i >= 0; i--) {
+					owned[i].dispose()
 				}
-				this.owned = undefined
-			} else {
-				this.owned.dispose()
-				this.owned = undefined
+				owned.length = 0
 			}
 		}
 
 		doCleanups() {
-			if (!this.cleanups) {
-			} else if (isArray(this.cleanups)) {
-				for (let i = this.cleanups.length - 1; i >= 0; i--) {
-					this.cleanups[i]()
+			const cleanups = this.cleanups
+			if (cleanups.length) {
+				for (let i = cleanups.length - 1; i >= 0; i--) {
+					try {
+						cleanups[i]()
+					} catch (err) {
+						routeError(this, err)
+					}
 				}
-				this.cleanups = undefined
-			} else {
-				this.cleanups()
-				this.cleanups = undefined
+				cleanups.length = 0
 			}
 		}
 	}
@@ -199,13 +203,22 @@ export function createReactiveSystem() {
 		/** @type {Function | undefined} */
 		fn
 
-		sources
-		sourceSlots
+		// Initialized to the shared `EMPTY` sentinel so V8 sees a
+		// stable JSArray slot type from the first read. Without it,
+		// each fresh Computation transitions `sources` / `sourceSlots`
+		// from undefined to array on its first tracked read, which
+		// matches the pattern documented for `observers` /
+		// `observerSlots` on `Memo` / `Signal`.
+		/** @type {any[]} */
+		sources = EMPTY
+
+		/** @type {number[]} */
+		sourceSlots = EMPTY
 
 		/**
 		 * @param {Computation} owner
 		 * @param {Function} fn
-		 * @param {object} [options]
+		 * @param {EffectOptions} [options]
 		 */
 		constructor(owner, fn, options) {
 			super(owner, options)
@@ -220,11 +233,14 @@ export function createReactiveSystem() {
 
 			const time = Time
 
-			runWith(this.fn, this, this)
-
-			/*} catch (err) {
+			try {
+				runWith(this.fn, this, this)
+			} catch (err) {
+				this.state = 1 /* STALE */
+				this.disposeOwned()
 				this.updatedAt = time + 1
-			}*/
+				routeError(this, err)
+			}
 
 			if (this.updatedAt < time) {
 				this.updatedAt = time
@@ -273,7 +289,7 @@ export function createReactiveSystem() {
 		/**
 		 * @param {Computation} owner
 		 * @param {Function} fn
-		 * @param {object} [options]
+		 * @param {EffectOptions} [options]
 		 */
 		constructor(owner, fn, options) {
 			super(owner, fn, options)
@@ -286,7 +302,7 @@ export function createReactiveSystem() {
 		/**
 		 * @param {Computation} owner
 		 * @param {Function} fn
-		 * @param {object} [options]
+		 * @param {EffectOptions} [options]
 		 */
 		constructor(owner, fn, options) {
 			super(owner, fn, options)
@@ -301,18 +317,22 @@ export function createReactiveSystem() {
 	class Memo extends Computation {
 		value
 
-		observers
-		observerSlots
+		/** @type {Computation[]} */
+		observers = EMPTY
 
-		// options:
-		// equals
+		/** @type {number[]} */
+		observerSlots = EMPTY
+
 		/**
 		 * @param {Computation} owner
 		 * @param {Function} fn
-		 * @param {object} [options]
+		 * @param {SignalOptions<T>} [options] - Accepts `equals`
 		 */
 		constructor(owner, fn, options) {
-			super(owner, fn, options)
+			// Memo extends Computation (EffectOptions) but accepts
+			// SignalOptions<T>. Pass undefined to super — Memo
+			// applies the signal-specific options itself below.
+			super(owner, fn, undefined)
 
 			if (options) {
 				assign(this, options)
@@ -363,20 +383,18 @@ export function createReactiveSystem() {
 
 			const time = Time
 
-			const nextValue = runWith(this.fn, this, this)
+			try {
+				const nextValue = runWith(this.fn, this, this)
 
-			/*} catch (err) {
-				this.state = 1 // STALE
+				if (this.updatedAt <= time) {
+					this.write(nextValue)
+					this.updatedAt = time
+				}
+			} catch (err) {
+				this.state = 1 /* STALE */
 				this.disposeOwned()
-
 				this.updatedAt = time + 1
-
-				throw err
-			} */
-
-			if (this.updatedAt <= time) {
-				this.write(nextValue)
-				this.updatedAt = time
+				routeError(this, err)
 			}
 		}
 		queue() {
@@ -389,6 +407,19 @@ export function createReactiveSystem() {
 		value = nothing
 
 		isResolved
+
+		[$isDerived] = true
+
+		/**
+		 * Monotonic write token. Bumped on every direct write or fresh
+		 * `update()`; recursive resolve steps capture and compare the
+		 * current value to detect stale promise resolutions. Was a fresh
+		 * `{}` per write — counter avoids the per-update allocation while
+		 * preserving identity-via-`===` semantics for the staleness check.
+		 *
+		 * @type {number}
+		 */
+		lastWrite = 0
 
 		/**
 		 * @param {Computation} owner
@@ -416,63 +447,59 @@ export function createReactiveSystem() {
 			this.read() // tracking
 			return this.isResolved === null
 		}
-		run = () => {
-			this.update()
+		_runFn = () => {
+			// @ts-expect-error
+			this.write(this.fn[0](), this.fn.slice(1))
 		}
 		update() {
 			this.dispose()
-			runWith(
-				() => {
-					// @ts-expect-error
-					this.write(this.fn[0](), this.fn.slice(1))
-				},
-				this,
-				this,
-			)
-			/*
-				} catch (err) {
-					this.state = 1 // STALE
-					this.disposeOwned()
 
-					this.updatedAt = time + 1
-
-					throw err
-				}
-			*/
-		}
-		write(nextValue, fns) {
 			const time = Time
 
-			if (this.updatedAt <= time) {
-				this.isResolved = undefined
+			try {
+				this.lastWrite++
 
-				withValue(
-					nextValue,
-					nextValue => {
-						if (this.updatedAt <= time) {
-							if (fns && fns.length) {
-								const fn = fns.shift()
-								this.write(() => fn(nextValue), fns)
-							} else {
-								this.isResolved = null
-
-								this.writeNextValue(nextValue)
-								this.updatedAt = time
-
-								this.resolve && this.resolve(this)
-							}
-						}
-					},
-					() => {
-						// is a promise so restore `then`
-						this.thenRestore()
-
-						// remove the old value while the promise is resolving
-						// to avoid the "Florida - New York City" problem
-						this.writeNextValue(nothing)
-					},
-				)
+				runWith(this._runFn, this, this)
+			} catch (err) {
+				this.state = 1 /* STALE */
+				this.disposeOwned()
+				this.updatedAt = time + 1
+				routeError(this, err)
 			}
+		}
+		write(nextValue, fns) {
+			this.isResolved = undefined
+
+			const mine = fns === undefined ? ++this.lastWrite : this.lastWrite
+
+			withValue(
+				nextValue,
+				nextValue => {
+					if (Listener || this.lastWrite === mine) {
+						if (fns && fns.length) {
+							this.write(() => fns[0](nextValue), fns.slice(1))
+						} else {
+							this.isResolved = null
+
+							this.writeNextValue(nextValue)
+							this.updatedAt = Time
+							// Mark CLEAN so a subsequent read does
+							// not re-run the original fn and clobber
+							// the user-written value. The update()
+							// path already set CLEAN via dispose(),
+							// so this is a no-op there.
+							this.state = 0 /* CLEAN */
+
+							this._fireThens()
+						}
+					}
+				},
+				() => {
+					// remove the old value while the promise is resolving
+					// to avoid the "Florida - New York City" problem
+					this.writeNextValue(nothing)
+				},
+			)
 		}
 		writeNextValue(value) {
 			if (!this.equals(this.value, value)) {
@@ -483,27 +510,46 @@ export function createReactiveSystem() {
 		}
 
 		/**
-		 * Thenable stuff. It has to be a property so assign works
-		 * properly
+		 * Thenable surface. Stays defined across commits so consumers
+		 * can register more than once: each call to `then` either
+		 * fires synchronously (if already resolved) or queues onto
+		 * `thenCallbacks`, drained by `_fireThens` on commit. Has to
+		 * be an instance arrow so `assign(self(), this)` carries it
+		 * onto the callable wrapper.
+		 *
+		 * We resolve with `_unwrap()` rather than `self()`: `self()`
+		 * carries `then` onto every fresh wrapper, which makes the
+		 * resolved value itself thenable — JS's `await` would
+		 * recursively `then` it forever. `_unwrap()` returns the
+		 * same callable shape but with `then` stripped, terminating
+		 * the recursion.
 		 */
 		then = (resolve, reject) => {
-			this._then(resolve, reject)
-		}
-		_then(resolve, reject) {
-			this.resolve = () => {
-				this.then = undefined
-				this.resolve = undefined
-				resolve(this.self())
-			}
+			// `resolved()` reads through `this.read()` which triggers
+			// `update()` on a STALE derived. Without it, awaiting a
+			// freshly-constructed derived would queue forever because
+			// the source fn never runs.
 			if (this.resolved()) {
-				this.resolve()
+				resolve(this._unwrap())
+				return
+			}
+			if (!this.thenCallbacks) this.thenCallbacks = []
+			this.thenCallbacks.push(resolve)
+		}
+		_fireThens() {
+			if (this.thenCallbacks) {
+				const cbs = this.thenCallbacks
+				this.thenCallbacks = undefined
+				const wrap = this._unwrap()
+				cbs.forEach(cb => cb(wrap))
 			}
 		}
-		thenRestore() {
-			if (!this.then) {
-				// TODO: unsure if has to be restored
-				this.then = this._then
-			}
+		_unwrap() {
+			// Bare read/write callable — no `assign(this)`, so no
+			// `then` is carried onto it. JS's await thenability
+			// check terminates here.
+			return (...args) =>
+				args.length ? this.write(args[0]) : this.read()
 		}
 	}
 
@@ -514,7 +560,7 @@ export function createReactiveSystem() {
 	 *
 	 * @template T
 	 * @param {(dispose: () => void) => T} fn
-	 * @param {object} [options]
+	 * @param {EffectOptions} [options]
 	 * @returns {T}
 	 */
 	function root(fn, options) {
@@ -525,19 +571,42 @@ export function createReactiveSystem() {
 	// SIGNAL
 
 	/**
-	 * @param {T} a
-	 * @param {T} b
+	 * @param {any} a
+	 * @param {any} b
 	 */
 	function equalsFalse(a, b) {
 		return false
 	}
 
 	/**
-	 * @param {T} a
-	 * @param {T} b
+	 * @param {any} a
+	 * @param {any} b
 	 */
 	function equals(a, b) {
 		return a === b
+	}
+
+	/**
+	 * Plain leaf observable shared with Memo/Derived for the
+	 * `o.observers` access in doRead/doWrite. observers / observerSlots
+	 * start as the EMPTY sentinel so the slot type is always JSArray —
+	 * eliminates the undefined→array transition that was making doRead
+	 * megamorphic across signal-literal vs Memo vs Derived shapes.
+	 */
+	class Signal {
+		/** @type {Computation[]} */
+		observers = EMPTY
+
+		/** @type {number[]} */
+		observerSlots = EMPTY
+
+		/** @type {any} */
+		value
+
+		/** @param {any} value */
+		constructor(value) {
+			this.value = value
+		}
 	}
 
 	/**
@@ -549,55 +618,43 @@ export function createReactiveSystem() {
 	 * @returns {SignalObject<T>}
 	 */
 	/* #__NO_SIDE_EFFECTS__ */ function signal(value, options) {
-		const o = {
-			observers: undefined,
-			observerSlots: undefined,
+		let _equals = equals
+		if (options) {
+			if (options.equals === false) _equals = equalsFalse
+			else if (options.equals) _equals = options.equals
 		}
 
-		let _equals
+		const o = new Signal(value)
 
 		function read() {
 			if (Listener) {
 				doRead(o)
 			}
 
-			return value
+			return o.value
 		}
 		function write(val) {
-			if (!_equals(value, val)) {
-				value = val
-
+			if (!_equals(o.value, val)) {
+				o.value = val
 				doWrite(o)
-
 				return true
 			}
 			return false
 		}
 		function update(val) {
-			return write(untrack(() => val(value)))
+			return write(untrack(() => val(o.value)))
 		}
 
-		const s = [read, write, update]
+		const s = /** @type {any} */ ([read, write, update])
 
-		// @ts-ignore
 		s.read = read
-		// @ts-ignore
 		s.write = write
-		// @ts-ignore
 		s.update = update
 
 		if (options) {
 			assign(s, options)
-			if (options.equals === false) {
-				_equals = equalsFalse
-			} else {
-				_equals = equals
-			}
-		} else {
-			_equals = equals
 		}
 
-		// @ts-ignore
 		return s
 	}
 
@@ -606,7 +663,8 @@ export function createReactiveSystem() {
 	 *
 	 * @template T
 	 * @param {() => T} fn
-	 * @param {object} [options]
+	 * @param {EffectOptions} [options]
+	 * @returns {void}
 	 */
 	function effect(fn, options) {
 		new Effect(Owner, fn, options)
@@ -617,7 +675,7 @@ export function createReactiveSystem() {
 	 *
 	 * @template T
 	 * @param {() => T} fn
-	 * @param {object} [options]
+	 * @param {EffectOptions} [options]
 	 */
 	function track(fn, options) {
 		let ran
@@ -638,8 +696,8 @@ export function createReactiveSystem() {
 	 *
 	 * @template T
 	 * @param {() => T} fn
-	 * @param {object} [options]
-	 * @returns T
+	 * @param {EffectOptions} [options]
+	 * @returns {void}
 	 */
 	function syncEffect(fn, options) {
 		new SyncEffect(Owner, fn, options)
@@ -649,9 +707,10 @@ export function createReactiveSystem() {
 	 * Creates an effect with explicit dependencies
 	 *
 	 * @template T
-	 * @param {Function} depend - Function that causes tracking
+	 * @param {() => any} depend - Function that causes tracking
 	 * @param {() => T} fn - Function that wont cause tracking
-	 * @param {object} [options]
+	 * @param {EffectOptions} [options]
+	 * @returns {void}
 	 */
 	function on(depend, fn, options) {
 		effect(() => {
@@ -664,13 +723,21 @@ export function createReactiveSystem() {
 	 * Creates a read-only signal from the return value of a function
 	 * that automatically updates
 	 *
+	 * The return type intersects `SignalAccessor<T>` with a phantom `{
+	 * readonly memo?: void }` property. The phantom never exists at
+	 * runtime — its sole purpose is to give TypeScript more structural
+	 * information so it can infer `T` cleanly when memo() is called
+	 * inline inside another generic context, e.g. `<For each={memo(()
+	 * => [...])}>`. Without it, bidirectional inference between two
+	 * generic calls collapses `T` to `unknown`.
+	 *
 	 * @template T
 	 * @param {() => T} fn - Function to re-run when dependencies change
 	 * @param {SignalOptions<T>} [options]
-	 * @returns {SignalAccessor<T>}
+	 * @returns {SignalAccessor<T> & { readonly memo?: void }}
 	 */
 	/* #__NO_SIDE_EFFECTS__ */ function memo(fn, options = undefined) {
-		return /** @type {SignalAccessor<T>} */ (
+		return /** @type {SignalAccessor<T> & { readonly memo?: void }} */ (
 			/** @type {unknown} */ (new Memo(Owner, fn, options).read)
 		)
 	}
@@ -680,9 +747,9 @@ export function createReactiveSystem() {
 	 * functions and promises recursively
 	 */
 	/* #__NO_SIDE_EFFECTS__ */ const derived =
-		/** @type {import('./derived.d.ts').derived} */ (
+		/** @type {import('#type/derived.d.ts').derived} */ (
 			/** @type {unknown} */ (...fn) =>
-				/** @type {import('./derived.d.ts').derived} */ (
+				/** @type {import('#type/derived.d.ts').derived} */ (
 					/** @type {unknown} */ (new Derived(Owner, fn))
 				)
 		)
@@ -730,7 +797,11 @@ export function createReactiveSystem() {
 		}
 	}
 	function runWithOwner(owner, fn) {
-		return runWith(() => runUpdates(fn, true), owner)
+		try {
+			return runWith(() => runUpdates(fn, true), owner)
+		} catch (err) {
+			routeError(owner, err)
+		}
 	}
 
 	/**
@@ -751,7 +822,7 @@ export function createReactiveSystem() {
 	/**
 	 * Runs a callback on cleanup, returns callback
 	 *
-	 * @template {Function} T
+	 * @template {() => void} T
 	 * @param {T} fn
 	 * @returns {T}
 	 */
@@ -760,17 +831,59 @@ export function createReactiveSystem() {
 		return fn
 	}
 
+	/**
+	 * Runs `fn` and routes any error — synchronous or reactive — from
+	 * its descendants to `handler` instead of the console.
+	 *
+	 * @template T
+	 * @param {() => T} fn
+	 * @param {(err: unknown) => void} handler
+	 * @returns {T | undefined}
+	 */
+	function catchError(fn, handler) {
+		let result
+		syncEffect(() => {
+			const parentHandler =
+				/** @type {((err: unknown) => void) | undefined} */ (
+					Owner.context && Owner.context[errorHandlerId]
+				)
+
+			const safeHandler = err => {
+				try {
+					handler(err)
+				} catch (handlerErr) {
+					if (parentHandler) parentHandler(handlerErr)
+					else console.error(handlerErr)
+				}
+			}
+
+			Owner.context = {
+				...Owner.context,
+				[errorHandlerId]: safeHandler,
+			}
+			try {
+				result = untrack(fn)
+			} catch (err) {
+				Owner.disposeOwned()
+				safeHandler(err)
+			}
+		})
+		return result
+	}
+
 	// UPDATES
 
 	function runTop(node) {
 		switch (node.state) {
-			case 0 /* CLEAN */: {
-				break
-			}
-			case 2 /* CHECK */: {
-				upstream(node)
-				break
-			}
+			case 0 /* CLEAN */:
+				{
+					break
+				}
+			case 2 /* CHECK */:
+				{
+					upstream(node)
+					break
+				}
 
 			default: {
 				const ancestors = []
@@ -785,21 +898,54 @@ export function createReactiveSystem() {
 					node = ancestors[i]
 
 					switch (node.state) {
-						case 1 /* STALE */: {
-							node.update()
-							break
-						}
-						case 2 /* CHECK */: {
-							updates = Updates
-							Updates = undefined
-							runUpdates(() => upstream(node, ancestors[0]))
-							Updates = updates
-							break
-						}
+						case 1 /* STALE */:
+							{
+								node.update()
+								break
+							}
+						case 2 /* CHECK */:
+							{
+								updates = Updates
+								Updates = undefined
+								runUpdates(() => upstream(node, ancestors[0]))
+								Updates = updates
+								break
+							}
 					}
 				}
 			}
 		}
+	}
+
+	// Pools for Updates and Effects. Reused across calls so the array
+	// literal sites don't deopt with "Insufficient type feedback for
+	// array literal" and V8 keeps a stable JSArray elements kind.
+	//
+	// Both must be pools, not single scratch arrays. Updates can have
+	// multiple arrays alive at once because the save/restore pattern
+	// at solid.js:340-343 and solid.js:892-895 deliberately bypasses
+	// the `if (Updates) return fn()` early-exit by setting Updates to
+	// undefined before re-entering — so the inner runUpdates needs an
+	// array independent of the outer's. Effects can also have multiple
+	// arrays alive when runEffects iterates the captured queue while
+	// nested work queues into a fresh one.
+	const _updatesPool = [[]]
+	const _effectsPool = [[]]
+
+	// Static helper used by `runUpdates` to drain `Effects` in a fresh
+	// nested batch. Replaces the `() => runEffects(effects)` closure
+	// that was previously allocated on every top-level batch — heap
+	// profile flagged it as a hot small-object allocation. The slot
+	// is module-scoped (created once) and is only set immediately
+	// before the recursive `runUpdates` call, so there is no risk of
+	// re-entrant overwrite: nested `runUpdates` calls hit the
+	// `if (Updates) return fn()` early-exit before reaching this
+	// path.
+	let _pendingEffects
+	function _drainEffects() {
+		const effects = _pendingEffects
+		_pendingEffects = undefined
+		runEffects(effects)
 	}
 
 	/**
@@ -815,14 +961,16 @@ export function createReactiveSystem() {
 
 		let wait = false
 
+		let myUpdates
 		if (!init) {
-			Updates = []
+			myUpdates = Updates = _updatesPool.pop() || []
 		}
 
+		let myEffects
 		if (Effects) {
 			wait = true
 		} else {
-			Effects = []
+			myEffects = Effects = _effectsPool.pop() || []
 		}
 
 		Time++
@@ -840,7 +988,10 @@ export function createReactiveSystem() {
 			if (!wait) {
 				const effects = Effects
 				Effects = undefined
-				effects.length && runUpdates(() => runEffects(effects))
+				if (effects.length) {
+					_pendingEffects = effects
+					runUpdates(_drainEffects)
+				}
 			}
 
 			return res
@@ -851,6 +1002,15 @@ export function createReactiveSystem() {
 			Updates = undefined
 
 			throw err
+		} finally {
+			if (myUpdates) {
+				myUpdates.length = 0
+				_updatesPool.push(myUpdates)
+			}
+			if (myEffects) {
+				myEffects.length = 0
+				_effectsPool.push(myEffects)
+			}
 		}
 	}
 
@@ -875,16 +1035,18 @@ export function createReactiveSystem() {
 		for (const source of node.sources) {
 			if (source.sources) {
 				switch (source.state) {
-					case 1 /* STALE */: {
-						if (source !== ignore && source.updatedAt < Time) {
-							runTop(source)
+					case 1 /* STALE */:
+						{
+							if (source !== ignore && source.updatedAt < Time) {
+								runTop(source)
+							}
+							break
 						}
-						break
-					}
-					case 2 /* CHECK */: {
-						upstream(source, ignore)
-						break
-					}
+					case 2 /* CHECK */:
+						{
+							upstream(source, ignore)
+							break
+						}
 				}
 			}
 		}
@@ -905,6 +1067,7 @@ export function createReactiveSystem() {
 	 *
 	 * @template T
 	 * @param {T} [defaultValue] - Default value for the context
+	 * @returns {Context<T>}
 	 */
 	/* #__NO_SIDE_EFFECTS__ */ function context(
 		defaultValue = undefined,
@@ -912,11 +1075,18 @@ export function createReactiveSystem() {
 		const id = Symbol()
 
 		/**
-		 * @overload Runs `fn` with a new value as context
+		 * @overload Runs `fn` with the full context value
 		 * @param {T} newValue - New value for the context
-		 * @param {() => Children} fn - Callback to run with the new
+		 * @param {() => JSX.Element} fn - Callback to run with the new
 		 *   context value
-		 * @returns {Children} Context value
+		 * @returns {JSX.Element} Context value
+		 */
+		/**
+		 * @overload Runs `fn` with a partial override of the context
+		 * @param {Partial<T>} newValue - Partial override
+		 * @param {() => JSX.Element} fn - Callback to run with the new
+		 *   context value
+		 * @returns {JSX.Element} Context value
 		 */
 		/**
 		 * @overload Gets the context value
@@ -944,14 +1114,16 @@ export function createReactiveSystem() {
 		 * Sets the `value` for the context
 		 *
 		 * @param {object} props
-		 * @param {Partial<T>} props.value
-		 * @param {Children} props.children
-		 * @returns {Children} Children
+		 * @param {Partial<T> | { [K in keyof T]?: Accessor<T[K]> }} props.value
+		 * @param {JSX.Element} [props.children]
+		 * @returns {JSX.Element}
 		 * @url https://pota.quack.uy/Reactivity/Context
 		 */
 		useContext.Provider = props =>
-			// @ts-expect-error
-			useContext(props.value, () => context.toHTML(props.children))
+			useContext(/** @type {Partial<T>} */ (props.value), () =>
+				// @ts-expect-error `toHTML` is attached by renderer.js at module init
+				context.toHTML(props.children),
+			)
 
 		/**
 		 * Maps context following `parent` property (if any). When `true`
@@ -959,6 +1131,7 @@ export function createReactiveSystem() {
 		 *
 		 * @param {(context: T) => boolean | void} callback
 		 * @param {T} [context]
+		 * @returns {boolean}
 		 */
 		useContext.walk = (callback, context) =>
 			walkParents(context || useContext(), 'parent', callback)
@@ -985,13 +1158,18 @@ export function createReactiveSystem() {
 			 * `onCancel` if provided.
 			 */
 			let cleaned
-			const clean = cleanup(() => {
+
+			cleanup(() => {
+				// only run onCancel when actually is canceled
+				onCancel && cleaned === undefined && onCancel()
 				cleaned = null
-				onCancel && onCancel()
 			})
 
 			return (...args) => {
-				o?.cleanupCancel(clean)
+				// if the function runs, then it wont be canceled
+				onCancel = null
+
+				// only run callback when owner wasnt disposed
 				return cleaned !== null && runWithOwner(o, () => cb(...args))
 			}
 		}
@@ -1003,15 +1181,80 @@ export function createReactiveSystem() {
 	 * the result to a callback
 	 *
 	 * @template T
-	 * @param {Accessor<T> | Promise<T>} value
+	 * @param {Attribute<T>} value
 	 * @param {(value: T) => void} fn
 	 */
-	function withValue(value, fn, writeDefaultValue = noop) {
+	function withValue(
+		value,
+		fn,
+		writeDefaultValue = noop,
+		wroteValue = undefined,
+		resolved = undefined,
+	) {
+		// `wroteValue` and `resolved` are lazily allocated INSIDE the
+		// branches that need them. The terminal `fn(value)` path is
+		// the common case (every reactive prop assignment for a
+		// primitive/element value goes through it) — making the
+		// defaults eager allocated `{ value: false }` + `[]` per
+		// call, even for the terminal path that never reads them.
+		// Lazy init keeps that hot path allocation-free.
 		if (isFunction(value)) {
 			// TODO maybe change this to be a memo
-			effect(() => withValue(value(), fn, writeDefaultValue))
+
+			if (wroteValue === undefined) wroteValue = { value: false }
+			if (resolved === undefined) resolved = []
+
+			syncEffect(() =>
+				withValue(
+					value(),
+					fn,
+					writeDefaultValue,
+					wroteValue,
+					resolved,
+				),
+			)
+		} else if (
+			isArray(value) &&
+			(resolved === undefined || !resolved.includes(value))
+		) {
+			// TODO maybe do same for objects ...
+
+			if (wroteValue === undefined) wroteValue = { value: false }
+			if (resolved === undefined) resolved = []
+			resolved.push(value)
+
+			// when empty it should update too
+			if (value.length === 0) {
+				fn(value)
+				return
+			}
+
+			let pending = value.length
+			value.forEach((item, i) => {
+				withValue(
+					item,
+					item => {
+						value[i] = item
+						if (--pending === 0) {
+							withValue(
+								value,
+								fn,
+								writeDefaultValue,
+								wroteValue,
+								resolved,
+							)
+						}
+					},
+					writeDefaultValue,
+					wroteValue,
+					resolved,
+				)
+			})
 		} else if (isPromise(value)) {
-			asyncTracking.add()
+			if (wroteValue === undefined) wroteValue = { value: false }
+			if (resolved === undefined) resolved = []
+
+			const remove = asyncTracking.add()
 			/**
 			 * WriteDefaultValue is used to avoid a double write. If the
 			 * value has no promises, then it will be a native value or a
@@ -1020,16 +1263,24 @@ export function createReactiveSystem() {
 			 * In case of promises, the value is resolved at a later point
 			 * in time, so we need an intermediate default
 			 */
-			writeDefaultValue()
+			!wroteValue.value && writeDefaultValue()
+			wroteValue.value = true
 
 			value.then(
-				owned(
-					value => {
-						asyncTracking.remove()
-						withValue(value, fn, noop)
-					},
-					() => asyncTracking.remove(),
-				),
+				owned(value => {
+					remove()
+					withValue(
+						value,
+						fn,
+						writeDefaultValue,
+						wroteValue,
+						resolved,
+					)
+				}, remove),
+				owned(err => {
+					remove()
+					throw err
+				}, remove),
 			)
 		} else {
 			fn(value)
@@ -1044,7 +1295,12 @@ export function createReactiveSystem() {
 		isFunction(value)
 			? track(() => resolve(getValue(value), cbs))
 			: isPromise(value)
-				? value.then(owned(value => resolve(value, cbs)))
+				? value.then(
+						owned(value => resolve(value, cbs)),
+						owned(err => {
+							throw err
+						}),
+					)
 				: cbs.length
 					? resolve(() => cbs[0](value), cbs.slice(1))
 					: value
@@ -1053,7 +1309,7 @@ export function createReactiveSystem() {
 	 * Unwraps functions and promises recursively canceling if owner
 	 * gets disposed
 	 *
-	 * @type {import('./action.d.ts').action}
+	 * @type {import('#type/action.d.ts').action}
 	 */
 	const action = (...cbs) =>
 		owned((...args) => {
@@ -1069,11 +1325,15 @@ export function createReactiveSystem() {
 
 		function add() {
 			count++
+			let removed
+			return () => {
+				if (removed === undefined) {
+					removed = null
+					--count === 0 && queue()
+				}
+			}
 		}
 
-		function remove() {
-			--count === 0 && queue()
-		}
 		function ready(fn) {
 			fns.push(owned(fn))
 			queue()
@@ -1094,7 +1354,7 @@ export function createReactiveSystem() {
 				call(cbs)
 			}
 		}
-		return { add, remove, ready }
+		return { add, ready }
 	})()
 
 	/** Suspense */
@@ -1103,13 +1363,17 @@ export function createReactiveSystem() {
 		c = 0
 		add() {
 			this.c++
-			asyncTracking.add()
-		}
-		remove() {
-			if (--this.c === 0) {
-				this.s.write(true)
+			const asyncRemove = asyncTracking.add()
+			let removed
+			return () => {
+				if (removed === undefined) {
+					removed = null
+					if (--this.c === 0) {
+						this.s.write(true)
+					}
+					asyncRemove()
+				}
 			}
-			asyncTracking.remove()
 		}
 		isEmpty() {
 			return this.c === 0
@@ -1120,20 +1384,28 @@ export function createReactiveSystem() {
 
 	// export
 
+	/** Returns the current reactive listener, if any. */
+	function listener() {
+		return Listener
+	}
+
 	return {
 		action,
 		asyncTracking,
 		batch,
+		catchError,
 		cleanup,
 		context,
 		createSuspenseContext,
 		derived,
 		effect,
+		listener,
 		memo,
 		on,
 		owned,
 		owner,
 		root,
+		Root,
 		runWithOwner,
 		signal,
 		syncEffect,

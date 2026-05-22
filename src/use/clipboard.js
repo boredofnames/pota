@@ -7,7 +7,9 @@ import { propsPlugin } from '../core/props/plugin.js'
 
 /**
  * @param {DOMElement} node
- * @param {((e: EventEvent<EventType['click'], DOMElement>) => string)
+ * @param {((
+ * 			e: JSX.EventEvent<JSX.EventType['click'], DOMElement>,
+ * 	  ) => string)
  * 	| boolean
  * 	| string} value
  * @url https://pota.quack.uy/use/clipboard

@@ -1,4 +1,4 @@
-import { memo, signal } from '../lib/reactive.js'
+import { effect, memo, signal } from '../lib/reactive.js'
 import { mutable, replace } from '../lib/store.js'
 import {
 	empty,
@@ -53,27 +53,6 @@ const searchParamsMemo = memo(() => {
 })
 searchParamsMemo()
 
-const params = mutable(
-	/** @type {Record<PropertyKey, string>} */ ({}),
-)
-const paramsMemo = memo(() => {
-	const values = empty()
-
-	useRoute.walk(context => {
-		for (const [key, value] of entries(context.params()())) {
-			values[key] =
-				value !== undefined
-					? decodeURIComponent(/** @type {string} */ (value))
-					: value
-		}
-	})
-
-	replace(params, values)
-
-	return values
-})
-paramsMemo()
-
 export const location = freeze({
 	protocol: locationObject().protocol,
 	origin: locationObject().origin,
@@ -84,9 +63,36 @@ export const location = freeze({
 	hash,
 	search,
 	searchParams,
-	// searchParamsMemo,
-	params,
-	// paramsMemo,
+	/**
+	 * Reactive params for the caller's enclosing route chain. The
+	 * effect/mutable created here are owned by the caller's scope and
+	 * disposed automatically when that scope ends.
+	 *
+	 * Capture once at component setup (`const p = location.params`)
+	 * and read keys reactively from `p`. Do not call `location.params`
+	 * inline inside a reactive expression — every access creates a
+	 * fresh effect+mutable. Must be called inside an owner scope, or
+	 * the inner effect is orphaned.
+	 */
+	get params() {
+		const params = mutable(
+			/** @type {Record<PropertyKey, string>} */ ({}),
+		)
+		effect(() => {
+			path() // track URL changes explicitly, not via Route.params
+			const values = empty()
+			useRoute.walk(context => {
+				for (const [key, value] of entries(context.params()())) {
+					values[key] =
+						value !== undefined
+							? decodeURIComponent(/** @type {string} */ (value))
+							: value
+				}
+			})
+			replace(params, values)
+		})
+		return params
+	},
 })
 
 let BeforeLeave = []
@@ -118,7 +124,9 @@ async function canNavigate(href) {
 	const newBeforeLeave = []
 	for (const beforeLeave of BeforeLeave) {
 		if (href.indexOf(beforeLeave.href) !== 0) {
-			if (!(await beforeLeave.cb().catch(() => false))) {
+			if (
+				!(await Promise.resolve(beforeLeave.cb()).catch(() => false))
+			) {
 				return false
 			}
 		} else {
@@ -203,6 +211,21 @@ function navigateUser(href, options = nothing) {
 }
 export { navigateUser as navigate }
 
+/**
+ * Synchronous navigation for tests — sets the URL and updates the
+ * location signal without going through the async navigate pipeline
+ * or view transitions.
+ *
+ * @param {string} href - Full or absolute URL
+ * @param {{ replace?: boolean }} [options]
+ */
+export function navigateSync(href, options) {
+	options?.replace
+		? history.replaceState(null, '', href)
+		: history.pushState(null, '', href)
+	setLocation(wLocation.href)
+}
+
 // listeners
 
 let addListenersAdded = false
@@ -229,14 +252,6 @@ export function addListeners() {
  * @returns {Promise<void>}
  */
 async function onLocationChange() {
-	// chrome has a bug on which if you use the back/forward button
-	// it will change the title of the tab to whatever it was before
-	// if the navigation is prevented (therefore the title/page wont change)
-	// it will still use the old title even if the title tag didn't change at all
-	const title = document.title
-	document.title = title + ' '
-	document.title = title
-
 	if (await canNavigate(wLocation.href)) {
 		setLocation(wLocation.href)
 	} else {

@@ -1,8 +1,11 @@
 import { $isMutable } from '../../../constants.js'
 import { batch } from '../../reactive.js'
 import {
+	is,
 	isFunction,
+	reflectDefineProperty,
 	reflectGet,
+	reflectGetOwnPropertyDescriptor,
 	reflectSet,
 	iterator,
 	reflectApply,
@@ -22,21 +25,35 @@ export class ProxyHandlerArray extends ProxyHandlerBase {
 			return true
 		}
 
+		if (this.isIdentityKey(key)) {
+			return reflectGet(target, key, proxy)
+		}
+
+		const shouldTrack = this.shouldTrackKey(key)
+
 		/** To be able to track properties not yet set */
-		if (!(key in target)) {
+		if (shouldTrack && !(key in target)) {
 			this.track.isUndefinedRead(key, true)
 		}
 
 		const value = reflectGet(target, key, proxy)
 
-		return isFunction(value)
-			? this.returnFunction(target, key, value, proxy)
-			: this.track.valueRead(
+		if (isFunction(value)) {
+			return this.returnFunction(target, key, value, proxy)
+		}
+
+		return shouldTrack
+			? this.track.valueRead(
 					key,
 					this.returnValue(target, key, value),
 				)
+			: this.returnValue(target, key, value)
 	}
 	set(target, key, value, proxy) {
+		if (!this.shouldTrackKey(key)) {
+			return reflectSet(target, key, mutable(value), proxy)
+		}
+
 		return batch(() => {
 			/** Always work with mutables */
 			value = mutable(value)
@@ -78,6 +95,63 @@ export class ProxyHandlerArray extends ProxyHandlerBase {
 			 */
 			this.track.valueWrite('length', target.length)
 
+			return r
+		})
+	}
+
+	/**
+	 * Arrays track every key via the proxy's `get`/`set` traps (see
+	 * above), so the base class's `signalifyKey` step would install a
+	 * redundant accessor wrapper on top, double-tracking numeric
+	 * indices. Override here to do the descriptor work and fire tracker
+	 * notifications directly — without accessor wrapping.
+	 */
+	defineProperty(target, key, descriptor) {
+		if (!this.shouldTrackKey(key)) {
+			return reflectDefineProperty(target, key, descriptor)
+		}
+
+		return batch(() => {
+			const wasIn = key in target
+			const oldDesc = wasIn
+				? reflectGetOwnPropertyDescriptor(target, key)
+				: undefined
+
+			const r = reflectDefineProperty(target, key, descriptor)
+			if (r) {
+				const newDesc = reflectGetOwnPropertyDescriptor(target, key)
+				const oldEnum = oldDesc ? oldDesc.enumerable : false
+				const newEnum = newDesc ? newDesc.enumerable : false
+
+				if (!wasIn) {
+					this.track.keyWrite(key, true)
+					if (newEnum) this.track.keysWrite()
+				} else if (oldEnum !== newEnum) {
+					this.track.keysWrite()
+				}
+
+				// Gate `valuesWrite()` on whether anything actually
+				// changed. We compare old vs new value directly
+				// (arrays keep data descriptors on the raw target, so
+				// `oldDesc.value` is meaningful). `valueWrite`'s
+				// return can't be trusted alone — first write to a
+				// never-read key always "fires" because the signal is
+				// initialized with `undefined`.
+				let changed = !wasIn
+				if ('value' in newDesc) {
+					const newValue = mutable(newDesc.value)
+					const oldValue =
+						oldDesc && 'value' in oldDesc ? oldDesc.value : undefined
+					this.track.isUndefinedWrite(key, newValue)
+					if (!is(oldValue, newValue)) {
+						this.track.valueWrite(key, newValue)
+						changed = true
+					}
+				} else if (!wasIn) {
+					this.track.isUndefinedWrite(key, null)
+				}
+				if (changed) this.track.valuesWrite()
+			}
 			return r
 		})
 	}
@@ -269,25 +343,41 @@ const arrayMethods = {
 	},
 
 	forEach(handler, target, value, args, proxy) {
+		const cb = args[0]
+		const thisArg = args[1]
 		handler.track.valuesRead()
 
-		reflectApply(value, target, args)
+		reflectApply(value, target, [
+			(element, index) => cb.call(thisArg, element, index, proxy),
+		])
 	},
 	map(handler, target, value, args, proxy) {
+		const cb = args[0]
+		const thisArg = args[1]
 		handler.track.valuesRead()
 
-		return reflectApply(value, target, args)
+		return reflectApply(value, target, [
+			(element, index) => cb.call(thisArg, element, index, proxy),
+		])
 	},
 
 	every(handler, target, value, args, proxy) {
+		const cb = args[0]
+		const thisArg = args[1]
 		handler.track.valuesRead()
 
-		return reflectApply(value, target, args)
+		return reflectApply(value, target, [
+			(element, index) => cb.call(thisArg, element, index, proxy),
+		])
 	},
 	some(handler, target, value, args, proxy) {
+		const cb = args[0]
+		const thisArg = args[1]
 		handler.track.valuesRead()
 
-		return reflectApply(value, target, args)
+		return reflectApply(value, target, [
+			(element, index) => cb.call(thisArg, element, index, proxy),
+		])
 	},
 
 	// lib.es2015.core.d.ts
@@ -377,32 +467,58 @@ const arrayMethods = {
 	},
 
 	filter(handler, target, value, args, proxy) {
+		const cb = args[0]
+		const thisArg = args[1]
 		handler.track.valuesRead()
 
-		return reflectApply(value, target, args)
+		return reflectApply(value, target, [
+			(element, index) => cb.call(thisArg, element, index, proxy),
+		])
 	},
 	reduce(handler, target, value, args, proxy) {
+		const cb = args[0]
 		handler.track.valuesRead()
 
-		return reflectApply(value, target, args)
+		const wrapped = (acc, element, index) =>
+			cb(acc, element, index, proxy)
+		return reflectApply(
+			value,
+			target,
+			args.length > 1 ? [wrapped, args[1]] : [wrapped],
+		)
 	},
 	reduceRight(handler, target, value, args, proxy) {
+		const cb = args[0]
 		handler.track.valuesRead()
 
-		return reflectApply(value, target, args)
+		const wrapped = (acc, element, index) =>
+			cb(acc, element, index, proxy)
+		return reflectApply(
+			value,
+			target,
+			args.length > 1 ? [wrapped, args[1]] : [wrapped],
+		)
 	},
 
 	// lib.es2015.core.d.ts
 
 	find(handler, target, value, args, proxy) {
+		const cb = args[0]
+		const thisArg = args[1]
 		handler.track.valuesRead()
 
-		return reflectApply(value, target, args)
+		return reflectApply(value, target, [
+			(element, index) => cb.call(thisArg, element, index, proxy),
+		])
 	},
 	findIndex(handler, target, value, args, proxy) {
+		const cb = args[0]
+		const thisArg = args[1]
 		handler.track.valuesRead()
 
-		return reflectApply(value, target, args)
+		return reflectApply(value, target, [
+			(element, index) => cb.call(thisArg, element, index, proxy),
+		])
 	},
 
 	// lib.es2015.iterable.d.ts
@@ -456,9 +572,13 @@ const arrayMethods = {
 		return reflectApply(value, target, args)
 	},
 	flatMap(handler, target, value, args, proxy) {
+		const cb = args[0]
+		const thisArg = args[1]
 		handler.track.valuesRead()
 
-		return reflectApply(value, target, args)
+		return reflectApply(value, target, [
+			(element, index) => cb.call(thisArg, element, index, proxy),
+		])
 	},
 
 	// lib.es2022.array.d.ts
@@ -476,14 +596,22 @@ const arrayMethods = {
 	// lib.es2023.array.d.ts
 
 	findLast(handler, target, value, args, proxy) {
+		const cb = args[0]
+		const thisArg = args[1]
 		handler.track.valuesRead()
 
-		return reflectApply(value, target, args)
+		return reflectApply(value, target, [
+			(element, index) => cb.call(thisArg, element, index, proxy),
+		])
 	},
 	findLastIndex(handler, target, value, args, proxy) {
+		const cb = args[0]
+		const thisArg = args[1]
 		handler.track.valuesRead()
 
-		return reflectApply(value, target, args)
+		return reflectApply(value, target, [
+			(element, index) => cb.call(thisArg, element, index, proxy),
+		])
 	},
 
 	toReversed(handler, target, value, args, proxy) {

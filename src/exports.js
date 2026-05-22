@@ -8,11 +8,13 @@ export {
 	action,
 	asyncEffect,
 	batch,
+	catchError,
 	cleanup,
 	context,
 	derived,
 	effect,
 	externalSignal,
+	listener,
 	isResolved,
 	map,
 	memo,
@@ -24,11 +26,13 @@ export {
 	signal,
 	syncEffect,
 	untrack,
+	unwrap,
 	withValue,
 	// components
 	isComponent,
 	makeCallback,
 	markComponent,
+	Pota,
 	// events
 	addEvent,
 	removeEvent,
@@ -36,7 +40,13 @@ export {
 
 // RENDERER
 
-export { Component, insert, render, toHTML } from './core/renderer.js'
+export {
+	Component,
+	Fragment,
+	insert,
+	render,
+	toHTML,
+} from './core/renderer.js'
 
 // EVENTS
 

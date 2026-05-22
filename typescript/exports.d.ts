@@ -1,5 +1,17 @@
-// this shows as an error but it works, do not change it!
+/** Export ambient(non-module d.ts files) here */
 
-export * from './pota.d.ts'
-export * from '../src/jsx/jsx.d.ts'
-export * from '../types/exports.d.ts'
+/// <reference path="./public/pota.d.ts" />
+/// <reference path="./public/components.d.ts" />
+/// <reference path="./jsx/namespace.d.ts" />
+
+/** THIS MAY SHOW AS AN ERROR BUT ITS ACTUALLY CORRECT */
+
+/** Export modules here */
+
+export * from './private/derived.d.ts'
+export * from './private/action.d.ts'
+export * from './private/store.d.ts'
+
+export * from '../generated/types/exports.d.ts'
+// Re-exported so consumers can write `declare module 'pota'`
+export { JSX }

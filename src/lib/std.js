@@ -19,6 +19,7 @@ export const defineProperties = Object.defineProperties
 export const defineProperty = Object.defineProperty
 export const entries = Object.entries
 export const freeze = Object.freeze
+export const isFrozen = Object.isFrozen
 export const fromEntries = Object.fromEntries
 export const getOwnPropertyDescriptor =
 	Object.getOwnPropertyDescriptor
@@ -38,28 +39,28 @@ export const setPrototypeOf = Object.setPrototypeOf
 export const toArray = Array.from
 
 /**
- * @template T
- * @param {T} value
+ * @param {unknown} value
+ * @returns {Iterable<unknown>}
  */
 export const toValues = value =>
 	isArray(value)
 		? value
 		: isObject(value) && 'values' in /** @type {object} */ (value)
-			? /** @type {{ values(): IterableIterator<T> }} */ (
+			? /** @type {{ values(): IterableIterator<unknown> }} */ (
 					value
 				).values()
-			: toArray(/** @type {Iterable<T> | ArrayLike<T>} */ (value))
+			: toArray(/** @type {Iterable<unknown>} */ (value))
 
 /**
- * @template T
- * @param {T} value
+ * @param {unknown} value
+ * @returns {Iterable<[unknown, unknown]>}
  */
 export const toEntries = value =>
 	isObject(value) && 'entries' in /** @type {object} */ (value)
-		? /** @type {{ entries(): IterableIterator<[string, T]> }} */ (
+		? /** @type {{ entries(): IterableIterator<[unknown, unknown]> }} */ (
 				value
 			).entries()
-		: toArray(/** @type {Iterable<T> | ArrayLike<T>} */ (value))
+		: toArray(/** @type {Iterable<[unknown, unknown]>} */ (value))
 
 export const iterator = Symbol.iterator
 export const Iterator = window.Iterator
@@ -85,7 +86,8 @@ export const stringifySorted = o => {
 			.map(k => (tmp[k] = sort(o[k])))
 
 		if (asArray) {
-			// @ts-expect-error
+			/** @type {unknown[]} */
+			// @ts-expect-error freaking typescript
 			tmp.sort((a, b) => stringify(a).localeCompare(stringify(b)))
 		}
 		return tmp
@@ -130,6 +132,19 @@ export const resolved = (promise, onDone) =>
 	})
 
 /**
+ * Given a promise it adds `onDone` to `then` and `catch` that gets
+ * ignored.
+ *
+ * ```js
+ * resolved(promise, onDone)
+ * // is same as
+ * promise.then(onDone).catch(onDone)
+ * ```
+ */
+export const resolvedIgnoreError = (promise, onDone) =>
+	promise.then(onDone).catch(e => onDone(e.toString()))
+
+/**
  * Runs an array of functions
  *
  * @param {Iterable<Function>} fns
@@ -166,10 +181,10 @@ export const redefineProperty = (target, key, descriptor) =>
 	defineProperty(
 		target,
 		key,
-		assign(create(redefinePropertyDefailts), descriptor),
+		assign(create(redefinePropertyDefaults), descriptor),
 	)
 
-const redefinePropertyDefailts = {
+const redefinePropertyDefaults = {
 	__proto__: null,
 	configurable: true,
 	enumerable: true,
@@ -229,9 +244,11 @@ export function equals(a, b) {
 		}
 
 		let length, i, k
-		if (isArray(a)) {
+		// `a.constructor !== b.constructor` was checked above, so when
+		// `a` is an array `b` necessarily is too. The redundant
+		// `isArray(b)` lets TS narrow `b` without a cast.
+		if (isArray(a) && isArray(b)) {
 			length = a.length
-			// @ts-expect-error
 			if (length !== b.length) {
 				return false
 			}
@@ -243,9 +260,11 @@ export function equals(a, b) {
 			return true
 		}
 
-		if (a.constructor === RegExp)
-			// @ts-expect-error
-			return a.source === b.source && a.flags === b.flags
+		if (a.constructor === RegExp) {
+			const ra = /** @type {RegExp} */ (/** @type {unknown} */ (a))
+			const rb = /** @type {RegExp} */ (/** @type {unknown} */ (b))
+			return ra.source === rb.source && ra.flags === rb.flags
+		}
 		if (a.valueOf !== Object.prototype.valueOf)
 			return a.valueOf() === b.valueOf()
 		if (a.toString !== Object.prototype.toString)
@@ -276,6 +295,16 @@ export function equals(a, b) {
 	return a !== a && b !== b
 }
 
+export function deepFreeze(o) {
+	if (o !== null && isObject(o) && !isFrozen(o)) {
+		freeze(o)
+		for (const item of values(o)) {
+			deepFreeze(item)
+		}
+	}
+	return o
+}
+
 /**
  * Unwraps an array/childNodes to the first item if the length is 1
  *
@@ -287,12 +316,12 @@ export const unwrapArray = arr => (arr.length === 1 ? arr[0] : arr)
 /**
  * Flats an array/childNodes recursively
  *
- * @template {unknown | unknown[]} T
- * @param {T} arr
+ * @template T
+ * @param {T | T[]} arr
  * @returns {T[]}
  */
 export const flatToArray = arr =>
-	isArray(arr) ? arr.flat(Infinity) : [arr]
+	/** @type {T[]} */ (isArray(arr) ? arr.flat(Infinity) : [arr])
 
 /**
  * Flats an array/childNodes recursively if its an array else it
@@ -505,11 +534,11 @@ export const isSymbol = value => typeof value === 'symbol'
 export const isBoolean = value => typeof value === 'boolean'
 
 /**
- * Returns `true` when `value` may be a promise
+ * Returns `true` when `value` may be a promise (any thenable)
  *
  * @template T
  * @param {T} value
- * @returns {value is Promise<T>}
+ * @returns {value is Extract<T, PromiseLike<unknown>>}
  */
 export const isPromise = value =>
 	isFunction(/** @type {any} */ (value)?.then)
@@ -591,10 +620,12 @@ export const {
 	ownKeys: reflectOwnKeys,
 	has: reflectHas,
 	deleteProperty: reflectDeleteProperty,
+	defineProperty: reflectDefineProperty,
 	getOwnPropertyDescriptor: reflectGetOwnPropertyDescriptor,
 	get: reflectGet,
 	apply: reflectApply,
 	set: reflectSet,
+	setPrototypeOf: reflectSetPrototypeOf,
 	isExtensible: reflectIsExtensible,
 } = Reflect
 

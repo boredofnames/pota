@@ -1,5 +1,5 @@
 import { signal, cleanup, syncEffect } from '../lib/reactive.js'
-import { isIterable, toArray } from '../lib/std.js'
+import { isFunction, toArray } from '../lib/std.js'
 
 /**
  * Returns a `function` that receives as a second argument whats
@@ -14,6 +14,7 @@ export function usePrevious(fn) {
 	/** @param {T} [next] */
 	return next => {
 		previous = fn(next, previous)
+		return previous // for testing
 	}
 }
 
@@ -32,10 +33,15 @@ export function useSelector(value) {
 	syncEffect(() => {
 		const val = value()
 
-		const selected = isIterable(val)
+		const selected = isFunction(
+			/** @type {{ values?: Function }} */ (val)?.values,
+		)
 			? toArray(
-					// @ts-expect-error, no idea how to type this
-					val.values(),
+					/** @type {Iterable<unknown>} */ (
+						/** @type {unknown} */ (
+							/** @type {{ values: Function }} */ (val).values()
+						)
+					),
 				)
 			: val === undefined
 				? []

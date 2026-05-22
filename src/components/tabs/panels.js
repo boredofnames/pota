@@ -8,9 +8,14 @@ import { Show } from '../Show.js'
 /**
  * Renders a tab panel with contents
  *
+ * `props.children` is expected to be `Tabs.Panel` elements. Not
+ * enforced by TypeScript: JSX expressions always resolve to
+ * `JSX.Element`, so the specific component identity cannot be
+ * constrained at the type level.
+ *
  * @param {object} props
- * @param {import('./panels.js').Panel[]} [props.children]
- * @returns {Children}
+ * @param {JSX.Element} [props.children]
+ * @returns {JSX.Element}
  * @url https://pota.quack.uy/Components/Tabs
  */
 export function Panels(props) {
@@ -41,7 +46,7 @@ export function Panels(props) {
  * Passthrough for content in TabPanel
  *
  * @param {Merge<
- * 	Elements['section'],
+ * 	JSX.Elements['section'],
  * 	{
  * 		collapse?: boolean
  * 	}

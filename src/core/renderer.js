@@ -1,6 +1,12 @@
 // CONSTANTS
 
-import { $isComponent, $isMap, NS } from '../constants.js'
+import {
+	$isClass,
+	$isComponent,
+	$isDerived,
+	$isMap,
+	NS,
+} from '../constants.js'
 
 // LIB
 
@@ -29,6 +35,7 @@ import {
 	importNode,
 	isConnected,
 	querySelector,
+	toDiff,
 	walkElements,
 } from '../use/dom.js'
 
@@ -51,7 +58,7 @@ import {
 	useSuspense,
 } from '../lib/reactive.js'
 
-import { onFixes } from './scheduler.js'
+import { onFixes, ready } from './scheduler.js'
 
 // PROPERTIES / ATTRIBUTES
 
@@ -67,6 +74,8 @@ const useXMLNS = context()
 /**
  * Used by the regular JSX transform, as `<>...</>` or
  * `<Fragment>...</Fragment>`.
+ *
+ * @type {ParentComponent}
  */
 export const Fragment = props => props.children
 
@@ -79,18 +88,30 @@ export const Fragment = props => props.children
  * reactivity tree (think of nested effects that clear inner effects,
  * context, etc).
  *
- * @template {string | Function | Element | object | symbol} T
- * @template {ComponentProps<T>} P
- * @param {T} value
- * @param {P} [props]
- * @returns {(props?: P) => Children}
+ * @type {{
+ * 	<T extends string | Function | Element | object | symbol>(
+ * 		value: T,
+ * 	): (props?: Partial<ComponentProps<T>>) => JSX.Element
+ * 	<T extends keyof JSX.IntrinsicElements>(
+ * 		value: T,
+ * 		props: ComponentProps<T>,
+ * 	): (props?: Partial<ComponentProps<T>>) => JSX.Element
+ * 	<T extends Function | Element | object | symbol, P>(
+ * 		value: T,
+ * 		props: P,
+ * 	): (props?: Partial<P>) => JSX.Element
+ * }}
  * @url https://pota.quack.uy/Component
  */
-export function Component(value, props) {
+export const Component = (value, props = undefined) => {
 	if (value === Fragment) {
-		return /** @type P & {children: Children} */ (
-			/** @type {unkonwn} */ props
-		).children
+		return /** @type {(props?: object) => JSX.Element} */ (
+			/** @type {unknown} */ (
+				/** @type {{ children: JSX.Element }} */ (
+					/** @type {unknown} */ (props)
+				).children
+			)
+		)
 	}
 
 	/** Freeze props so isnt directly writable */
@@ -105,8 +126,7 @@ export function Component(value, props) {
 				component(
 					propsOverride
 						? freeze({
-								/** @ts-expect-error freaking typescript */
-								...props,
+								.../** @type {object} */ (props),
 								...propsOverride,
 							})
 						: props,
@@ -120,7 +140,7 @@ export function Component(value, props) {
  * @template T
  * @param {string | Function | Element | object | symbol} value -
  *   Component value
- * @returns {(props?: Props<T>) => Children}
+ * @returns {(props?: JSX.Props<T>) => JSX.Element}
  */
 function Factory(value) {
 	switch (typeof value) {
@@ -129,7 +149,11 @@ function Factory(value) {
 			return markComponent(props => createTag(value, props))
 		}
 		case 'function': {
-			return $isComponent in value ? value : markComponent(value)
+			return $isComponent in value
+				? value
+				: $isClass in value
+					? markComponent(props => createClass(value, props))
+					: markComponent(value)
 		}
 		default: {
 			if (value instanceof Element) {
@@ -146,25 +170,25 @@ function Factory(value) {
 /**
  * Creates a x/html element from a tagName
  *
- * @template {Props<{ xmlns?: string; is?: string }>} P
+ * @template {JSX.Props<{ xmlns?: string; is?: string }>} P
  * @param {string} tagName
  * @param {P} props
  * @returns {Element} Element
  */
-function createTag(tagName, props) {
+function createTag(tagName, props = nothing) {
 	/**
 	 * Namespace, use props xmlns or special case svg, math, etc in case
 	 * of missing xmlns attribute
 	 */
-	const xmlns = props?.xmlns || NS[tagName]
+	const xmlns = props.xmlns || NS[tagName]
 
 	return withXMLNS(
 		xmlns,
 		xmlns =>
 			createNode(
 				xmlns
-					? createElementNS(xmlns, tagName, { is: props?.is })
-					: createElement(tagName, { is: props?.is }),
+					? createElementNS(xmlns, tagName, { is: props.is })
+					: createElement(tagName, { is: props.is }),
 				props,
 			),
 		tagName,
@@ -182,6 +206,7 @@ let usedXML
  * @param {string} xmlns
  * @param {(xmlns: string) => T} fn
  * @param {string} [tagName]
+ * @returns {T}
  */
 function withXMLNS(xmlns, fn, tagName) {
 	if (!usedXML) {
@@ -195,7 +220,7 @@ function withXMLNS(xmlns, fn, tagName) {
 
 	if (xmlns && xmlns !== nsContext) {
 		// the xmlns changed, use the new xmlns
-		return useXMLNS(xmlns, () => fn(xmlns))
+		return /** @type {T} */ (useXMLNS(xmlns, () => fn(xmlns)))
 	}
 
 	/**
@@ -203,7 +228,7 @@ function withXMLNS(xmlns, fn, tagName) {
 	 * browser behaviour)
 	 */
 	if (nsContext && tagName === 'foreignObject') {
-		return useXMLNS(NS.html, () => fn(nsContext))
+		return /** @type {T} */ (useXMLNS(NS.html, () => fn(nsContext)))
 	}
 
 	return fn(nsContext)
@@ -244,17 +269,35 @@ function parseXML(content, xmlns) {
 }
 
 /**
+ * Creates an instance of a class component and handles lifecycle
+ * methods
+ *
+ * @param {{ new (props: any): JSX.ElementClass }} value - The class
+ *   constructor
+ * @param {JSX.Props<unknown>} props - Props to pass to the class
+ *   constructor
+ * @returns {JSX.Element} The rendered output
+ */
+function createClass(value, props = nothing) {
+	const i = new value(props)
+	i.props = freeze({ ...(i.props || nothing), ...props })
+	i.ready && ready(() => i.ready())
+	i.cleanup && cleanup(() => i.cleanup())
+	return i.render(i.props)
+}
+
+/**
  * Wraps values for JSX runtime helpers, ensuring we always return a
  * component function.
  *
  * @template T
  * @param {string | Function | Element | object | symbol} value
- * @returns {(props?: Props<T>) => Children}
+ * @returns {(props?: JSX.Props<T>) => JSX.Element}
  */
 export function createComponent(value) {
 	const component = Factory(value)
 
-	return props => {
+	return (props = nothing) => {
 		/** Freeze props so isnt directly writable */
 		freeze(props)
 		return markComponent(() => component(props))
@@ -269,7 +312,7 @@ export function createComponent(value) {
  * 	[i: number]: number
  * 	m?: number
  * } & Record<string, unknown>} [propsData]
- * @returns {(props: T[]) => Children}
+ * @returns {(props: T[]) => JSX.Element}
  */
 export function createPartial(content, propsData = nothing) {
 	let clone = () => {
@@ -285,19 +328,27 @@ export function createPartial(content, propsData = nothing) {
 	}
 
 	return props =>
-		markComponent(() => assignPartialProps(clone(), props, propsData))
+		markComponent(() =>
+			assignPartialProps(
+				clone(),
+				/** @type {((node: Node) => void)[]} */ (
+					/** @type {unknown} */ (props)
+				),
+				propsData,
+			),
+		)
 }
 
 /**
  * @template T
  * @param {Element} node
- * @param {Children[]} props
+ * @param {((node: Node) => void)[]} props
  * @param {{
  * 	x?: string
  * 	[i: number]: number
  * 	m?: number
  * } & Record<string, unknown>} propsData
- * @returns {Children}
+ * @returns {JSX.Element}
  */
 function assignPartialProps(node, props, propsData) {
 	if (props) {
@@ -320,10 +371,10 @@ function assignPartialProps(node, props, propsData) {
  *
  * @template T
  * @param {Element} node - Element to assign props to
- * @param {Props<T>} props - Props to assign
+ * @param {JSX.Props<T>} props - Props to assign
  * @returns {Element} The element with props assigned
  */
-function createNode(node, props) {
+function createNode(node, props = nothing) {
 	props && assignProps(node, props)
 
 	return node
@@ -334,11 +385,11 @@ function createNode(node, props) {
  *
  * @template T
  * @param {Element | DocumentFragment} parent
- * @param {Children | ((...unknonwn) => T)} child
+ * @param {JSX.Element | ((...unknonwn) => T)} child
  * @param {boolean} [relative]
  * @param {Text} [prev]
  * @param {true} [isComponent]
- * @returns {Children}
+ * @returns {JSX.Element}
  */
 export function createChildren(
 	parent,
@@ -374,46 +425,69 @@ export function createChildren(
 			if ($isComponent in child) {
 				return createChildren(
 					parent,
-					untrack(/** @type {() => Children} */ (child)),
+					untrack(/** @type {() => JSX.Element} */ (child)),
 					relative,
 					undefined,
 					true,
 				)
 			}
 
-			let node = []
-
 			// signal/memo/external/user provided function
 			// needs placeholder to stay in position
 			parent = createPlaceholder(parent, relative)
 
 			// For - TODO move this to the `For` component
-			$isMap in child
-				? effect(() => {
-						node = toDiff(
-							node,
-							flatToArray(
-								child(child => createChildren(parent, child, true)),
-							),
-							true,
-						)
-					})
-				: effect(() => {
-						// maybe a signal (at least a function) so needs an effect
-						node = toDiff(
-							node,
-							flatToArray(
-								createChildren(parent, child(), true, node[0]),
-							),
-							true,
-						)
-					})
+			if ($isMap in child) {
+				effect(() => {
+					// @ts-expect-error freaking typescript
+					child(child => createChildren(parent, child, true))
+				})
+				// map has own dom removal
+			} else {
+				let node = []
 
-			cleanup(() => {
-				toDiff(node)
-				// @ts-expect-error
-				parent.remove()
-			})
+				// `Derived` while pending. The renderer's other thenable
+				// branch lives under `case 'object'` and never sees
+				// these because `typeof derived === 'function'`. Register
+				// with the active Suspense so the fallback shows until
+				// the derived first resolves. `d.then` is multi-consumer,
+				// so a user `await d` later won't clobber our
+				// registration. `cleanup(remove)` covers dispose; `remove`
+				// is idempotent so the two paths are safe to converge.
+				if ($isDerived in child) {
+					const d = /** @type {Derived<unknown>} */ (child)
+					const remove = useSuspense().add()
+					cleanup(remove)
+					d.then(remove)
+				}
+
+				effect(() => {
+					// maybe a signal (at least a function) so needs an effect
+					node = toDiff(
+						node,
+						/** @type {DOMElement[]} */ (
+							flatToArray(
+								createChildren(
+									parent,
+									/** @type {() => JSX.Element} */ (child)(),
+									true,
+									node[0],
+								),
+							)
+						),
+						true,
+					)
+				})
+
+				cleanup(() => {
+					// console.log('clearing parent and node', parent, node)
+					if (parent.isConnected || node[0]?.isConnected) {
+						toDiff(node)
+						// @ts-expect-error freaking typescript
+						/** @type {Element} */ parent.remove()
+					}
+				})
+			}
 
 			/**
 			 * A placeholder is created and added to the document but doesnt
@@ -469,23 +543,24 @@ export function createChildren(
 
 			// async values
 			if ('then' in child) {
-				const suspense = useSuspense()
-				suspense.add()
+				const remove = useSuspense().add()
 
 				const [value, setValue] = signal(undefined)
-				const onResult = owned(
-					result => {
+
+				child.then(
+					owned(result => {
 						if (isComponent && isFunction(result)) {
 							markComponent(result)
 						}
 
 						setValue(result)
-						suspense.remove()
-					},
-					() => suspense.remove(),
+						remove()
+					}, remove),
+					owned(err => {
+						remove()
+						throw err
+					}, remove),
 				)
-
-				resolved(child, onResult)
 
 				return createChildren(parent, value, relative)
 			}
@@ -533,14 +608,18 @@ export function createChildren(
 		case 'undefined': {
 			return undefined
 		}
+		case 'boolean': {
+			// Dynamic booleans (e.g. from `cond && <span/>` short-
+			// circuits) render as nothing. Literal booleans in markup
+			// are filtered out at compile time by the Babel preset
+			// (babel-preset/transform/children.js), so compile-time
+			// and runtime behavior stay consistent.
+			return undefined
+		}
 		default: {
-			// boolean/bigint/symbol/catch all
+			// bigint/symbol/catch all
 			// toString() is needed for `Symbol`
-			return insertNode(
-				parent,
-				createTextNode(child.toString()),
-				relative,
-			)
+			return createChildren(parent, child.toString(), relative)
 		}
 	}
 }
@@ -600,6 +679,8 @@ function insertNode(parent, node, relative) {
 		// replace old node if there's any
 		prev ? prev.replaceWith(node) : parent.appendChild(node)
 	} else {
+		// maybe use relative ? parent.before(node) : parent.appendChild(node)
+
 		relative
 			? parent.parentNode.insertBefore(node, parent)
 			: parent.appendChild(node)
@@ -618,7 +699,7 @@ function insertNode(parent, node, relative) {
 /**
  * Inserts children into a parent
  *
- * @param {any} children - Thing to render
+ * @param {JSX.Element} children - Thing to render
  * @param {Element | null} [parent] - Mount point, defaults to
  *   document.body
  * @param {{ clear?: boolean; relative?: boolean }} [options] -
@@ -628,7 +709,11 @@ function insertNode(parent, node, relative) {
  */
 export function render(children, parent, options = nothing) {
 	const dispose = root(dispose => {
-		insert(children, parent, options)
+		insert(
+			Factory(isFunction(children) ? children : () => children),
+			parent,
+			options,
+		)
 		return dispose
 	})
 
@@ -639,7 +724,7 @@ export function render(children, parent, options = nothing) {
 }
 
 /**
- * @param {any} children - Thing to render
+ * @param {JSX.Element} children - Thing to render
  * @param {Element | null} [parent] - Mount point, defaults to
  *   `document.body`
  * @param {{ clear?: boolean; relative?: boolean }} [options] -
@@ -652,13 +737,11 @@ export function insert(
 ) {
 	if (options.clear && parent) parent.textContent = ''
 
-	const node = createChildren(
-		parent,
-		Factory(isFunction(children) ? children : () => children),
-		options.relative,
-	)
+	let node
 
 	cleanup(() => toDiff(flatToArray(node)))
+
+	node = createChildren(parent, children, options.relative)
 
 	return node
 }
@@ -666,8 +749,8 @@ export function insert(
 /**
  * Creates and returns HTML Elements for `children`
  *
- * @param {Children} children
- * @returns {Children}
+ * @param {JSX.Element} children
+ * @returns {ChildNode | NodeListOf<ChildNode>}
  * @url https://pota.quack.uy/toHTML
  */
 export function toHTML(children) {
@@ -681,13 +764,14 @@ export function toHTML(children) {
 	return unwrapArray(toHTMLFragment(children).childNodes)
 }
 
-/** @ts-expect-error freaking typescript */
+/* @type {typeof context & { toHTML: typeof toHTML }} */
+// @ts-expect-error freaking typescript
 context.toHTML = toHTML
 
 /**
  * Creates and returns a DocumentFragment for `children`
  *
- * @param {Children} children
+ * @param {JSX.Element} children
  * @returns {DocumentFragment}
  * @url https://pota.quack.uy/toHTML
  */
@@ -696,45 +780,4 @@ export function toHTMLFragment(children) {
 	createChildren(fragment, children)
 
 	return fragment
-}
-
-/**
- * Removes from the DOM `prev` elements not found in `next`
- *
- * @param {DOMElement[]} [prev=[]] - Array with previous elements.
- *   Default is `[]`
- * @param {DOMElement[]} [next=[]] - Array with next elements. Default
- *   is `[]`
- * @param {boolean} [short=false] - Whether to use fast clear. Default
- *   is `false`
- * @returns {DOMElement[]} The next array of elements
- */
-function toDiff(prev = [], next = [], short = false) {
-	// if theres something to remove
-	if (prev.length) {
-		// fast clear
-		if (
-			short &&
-			next.length === 0 &&
-			// + 1 because of the original placeholder
-			prev.length + 1 === prev[0].parentNode.childNodes.length
-		) {
-			const parent = prev[0].parentNode
-			// save the placeholder
-			const lastChild = parent.lastChild
-			parent.textContent = ''
-			parent.appendChild(lastChild)
-		} else if (next.length === 0) {
-			for (const item of prev) {
-				item && item.remove()
-			}
-		} else {
-			for (const item of prev) {
-				if (item && !next.includes(item)) {
-					item.remove()
-				}
-			}
-		}
-	}
-	return next
 }

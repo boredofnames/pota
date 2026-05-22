@@ -1,9 +1,21 @@
+documentation/**
+
+generated/docs/**
+generated/coverage/**
+generated/babel-preset-standalone.js
+
+typescript/readme.md
+
+tests/**
+tools/**
+
 .gitignore
-node_modules
+.npmignore
 
-src/release/**
-
-tsconfig.tsbuildinfo
-
-.vscode
+.claude
 .github
+.vscode
+.codex
+
+node_modules
+tsconfig.tsbuildinfo

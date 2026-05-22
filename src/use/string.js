@@ -1,4 +1,4 @@
-import { isString, noop, resolved } from '../lib/std.js'
+import { isString, noop, resolvedIgnoreError } from '../lib/std.js'
 
 /**
  * Converts kebab-case strings into camelCase.
@@ -23,7 +23,7 @@ export const capitalizeFirstLetter = string =>
  * @returns {Promise<void>}
  */
 export const copyToClipboard = s =>
-	resolved(navigator.clipboard.writeText(s), noop)
+	resolvedIgnoreError(navigator.clipboard.writeText(s), noop)
 
 /**
  * Creates a hex digest for the provided value using WebCrypto.
@@ -58,7 +58,7 @@ export const short = (string = '') =>
 /**
  * Ensures any value becomes a string (defaults to empty string).
  *
- * @param {string} s
+ * @param {unknown} s
  */
 export const ensureString = s => String(s || '')
 
@@ -146,8 +146,10 @@ export function diff(a, b) {
 				done = true
 				char = '->'
 			}
-			aa[i] = char + toString(a[i])
-			bb[i] = char + toString(b[i])
+			const la = toString(aa[i])
+			const lb = toString(bb[i])
+			aa[i] = char + la
+			bb[i] = char + lb
 		}
 		return [aa.join('\n'), bb.join('\n')]
 	}

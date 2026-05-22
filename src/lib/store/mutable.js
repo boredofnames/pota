@@ -5,6 +5,7 @@ import { untrack } from '../reactive.js'
 import { ProxyHandlerArray } from './proxies/array.js'
 import { ProxyHandlerObject } from './proxies/object.js'
 import { ProxyHandlerMap } from './proxies/map.js'
+import { ProxyHandlerSet } from './proxies/set.js'
 
 import { isMutationBlacklisted } from './blacklist.js'
 
@@ -38,12 +39,13 @@ function createProxy(target, Handler) {
 /**
  * Makes a recursive modifiable and trackeable object. Transforms in
  * place properties into signals via get/set. Works with inherited
- * getters/setters.
+ * getters/setters. New keys can be added at runtime; reads of
+ * not-yet-existing keys are tracked until they are added.
  *
  * @template T
  * @param {T} value
  * @param {boolean} [clone] - If to `copy` the value first
- * @returns {T}
+ * @returns {import('#type/store.d.ts').Mutable<T>}
  */
 export function mutable(value, clone) {
 	/** Return value as is when is not an object */
@@ -52,11 +54,13 @@ export function mutable(value, clone) {
 	}
 
 	/** Make a copy to avoid modifying original data (optional) */
-	value = clone ? copy(value) : value
+	value = clone ? untrack(() => copy(value)) : value
 
 	/** Avoid unwrapping external proxies */
 	if (value[$isMutable]) {
-		return value
+		return /** @type {import('#type/store.d.ts').Mutable<T>} */ (
+			value
+		)
 	}
 
 	/**
@@ -75,7 +79,9 @@ export function mutable(value, clone) {
 	 */
 	if (isMutationBlacklisted(value)) {
 		setProxy(value, value)
-		return value
+		return /** @type {import('#type/store.d.ts').Mutable<T>} */ (
+			value
+		)
 	}
 
 	/** Array methods are proxied by ProxyHandlerArray */
@@ -102,6 +108,25 @@ export function mutable(value, clone) {
 				map.set(key, mutable(value))
 			}),
 		)
+
+		return proxy
+	}
+
+	/** Set methods are proxied by ProxyHandlerSet */
+	if (value instanceof Set) {
+		proxy = createProxy(value, ProxyHandlerSet)
+
+		/**
+		 * Replace each element with its mutable wrap so nested objects
+		 * are reactive. Preserves insertion order.
+		 */
+		untrack(() => {
+			const items = [...value]
+			value.clear()
+			for (const item of items) {
+				value.add(mutable(item))
+			}
+		})
 
 		return proxy
 	}

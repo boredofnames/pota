@@ -32,13 +32,13 @@ of using this or SolidJS, you should use SolidJS.
 - TypeScript types are a work in progress and kind of messy.
 - Project will reach v1.0 once I'm happy with the API shape.
 - I keep notes related to this project
-  [here](https://github.com/potahtml/pota/blob/master/src/release/todo.md).
+  [here](https://github.com/potahtml/pota/blob/master/documentation/todo.md).
 - SSR is out of the scope of this project
 
 ### Links
 
-- [Documentation](https://pota.quack.uy/) with editable live examples
-  and a playground
+- [Documentation](https://pota.quack.uy/) — editable live examples and
+  a playground
 - For getting started, check out
   [templates](https://github.com/potahtml/templates)
 
@@ -51,8 +51,6 @@ of using this or SolidJS, you should use SolidJS.
 - https://www.npmjs.com/package/pota
 
 Thanks to: Joe, Fabio, Ryan, Erika, kilo, Javier, Paty, bigmistqke
-
-_Bug-free till proven otherwise._
 
  <img src="https://pota.quack.uy/assets/logo-small.png"/>
 

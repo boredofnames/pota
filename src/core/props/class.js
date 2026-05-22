@@ -1,6 +1,11 @@
 // node class / classList
 
-import { isFunction, isObject, isString } from '../../lib/std.js'
+import {
+	isArray,
+	isFunction,
+	isObject,
+	isString,
+} from '../../lib/std.js'
 import { withPrevValue } from '../../lib/reactive.js'
 
 import { addClass, removeClass } from '../../use/dom.js'
@@ -35,6 +40,9 @@ export function setClassList(node, value, prev) {
 	if (isString(value) || value == null) {
 		prev && _setClassListValue(node, prev, false)
 		value && _setClassListValue(node, value, true)
+	} else if (isArray(value)) {
+		prev && _setClassListValue(node, prev, false)
+		_setClassListValue(node, value.filter(Boolean), true)
 	} else if (isObject(value)) {
 		for (let name in value) {
 			setElementClass(node, name, value[name])
@@ -51,18 +59,20 @@ export function setClassList(node, value, prev) {
  * @param {unknown} value
  */
 export const setElementClass = (node, name, value) => {
-	withPrevValue(value, (value, prev) => {
-		if (!value && !prev) {
-			// on initialization do not remove whats not there
-		} else {
-			_setClassListValue(node, name, value)
-		}
-	})
+	isFunction(value)
+		? withPrevValue(value, (value, prev) => {
+				if (!value && !prev) {
+					// on initialization do not remove whats not there
+				} else {
+					_setClassListValue(node, name, value)
+				}
+			})
+		: _setClassListValue(node, name, value)
 }
 
 /**
  * @param {Element} node
- * @param {string} name
+ * @param {string | string[]} name
  * @param {unknown} value
  */
 const _setClassListValue = (node, name, value) => {

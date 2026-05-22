@@ -42,6 +42,40 @@ export const createElementNS = bind('createElementNS')
 export const createTextNode = bind('createTextNode')
 export const createComment = bind('createComment')
 
+/**
+ * Cleans a text value using the same whitespace rules JSX applies to
+ * `JSXText` children: strip leading/trailing whitespace adjacent to
+ * tags, drop blank lines, and add a single trailing space to non-last
+ * lines that survived. Returns `''` when the input was pure
+ * whitespace. Mirrors `cleanJSXElementLiteralChild` in
+ * `babel-preset/transform/children.js` so xml↔jsx round-trips don't
+ * have to fix up whitespace.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+export function cleanJSXText(value) {
+	const lines = value.split(/\r\n|\n|\r/)
+	let lastNonEmptyLine = 0
+	for (let i = 0; i < lines.length; i++) {
+		if (/[^ \t]/.test(lines[i])) {
+			lastNonEmptyLine = i
+		}
+	}
+	let str = ''
+	for (let i = 0; i < lines.length; i++) {
+		let trimmedLine = lines[i].replace(/\t/g, ' ')
+		if (i !== 0) trimmedLine = trimmedLine.replace(/^ +/, '')
+		if (i !== lines.length - 1)
+			trimmedLine = trimmedLine.replace(/ +$/, '')
+		if (trimmedLine) {
+			if (i !== lastNonEmptyLine) trimmedLine += ' '
+			str += trimmedLine
+		}
+	}
+	return str
+}
+
 export const importNode = bind('importNode')
 
 export const createTreeWalker = bind('createTreeWalker')
@@ -71,15 +105,17 @@ export const removePart = (node, partName) =>
 
 /**
  * Splits a string by whitespace into tokens; returns `emptyArray` for
- * falsy input.
+ * falsy or whitespace-only input.
  *
  * @param {string | undefined | null} s
  * @returns {string[]}
  */
-export const tokenList = s =>
-	s
-		? s.trim().split(/\s+/)
-		: /** @type string[] */ (/** @type unknown */ emptyArray)
+export const tokenList = s => {
+	s = s?.trim()
+	return s
+		? s.split(/\s+/)
+		: /** @type string[] */ (/** @type unknown */ (emptyArray))
+}
 
 /**
  * Adds CSS classes to an element using either a string or an array.
@@ -202,11 +238,11 @@ export const walkElements = function (
 	 *
 	 * Also the first node could be a DocumentFragment
 	 */
-	node.nodeType === 1 && nodes.push(node)
+	node.nodeType === 1 && max > 0 && nodes.push(node)
 
 	walk.currentNode = node
 
-	while (nodes.length !== max && (node = walk.nextNode())) {
+	while (nodes.length < max && (node = walk.nextNode())) {
 		nodes.push(node)
 	}
 	return nodes
@@ -228,4 +264,55 @@ export const walkElements = function (
 export function getValueElement(value, ...args) {
 	const element = getValueWithArguments(value, ...args)
 	return element instanceof Node ? element : undefined
+}
+
+/**
+ * Removes from the DOM `prev` elements not found in `next`
+ *
+ * @param {DOMElement[]} [prev=[]] - Array with previous elements.
+ *   Default is `[]`
+ * @param {DOMElement[]} [next=[]] - Array with next elements.
+ *   Default is `[]`
+ * @param {boolean} [short=false] - Whether to use fast clear. Default
+ *   is `false`
+ * @returns {DOMElement[]} The next array of elements
+ */
+export function toDiff(prev = [], next = [], short = false) {
+	// if theres something to remove
+	if (prev.length) {
+		// fast clear
+		if (short && next.length === 0) {
+			const parent = prev[0] && prev[0].parentNode
+			if (parent) {
+				// + 1 because of the original placeholder
+				if (prev.length + 1 === parent.childNodes.length) {
+					// console.log('fast clear')
+					// save the placeholder
+					const lastChild = parent.lastChild
+					parent.textContent = ''
+					parent.appendChild(lastChild)
+					return next
+				}
+			} else {
+				// console.log('parent gone already')
+				return next
+			}
+		}
+
+		if (next.length === 0) {
+			// console.log('removing each separately')
+			for (const item of prev) {
+				item && item.remove()
+			}
+			return next
+		}
+
+		for (const item of prev) {
+			// console.log('removing some')
+			if (item && !next.includes(item)) {
+				item.remove()
+			}
+		}
+	}
+	return next
 }

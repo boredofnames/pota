@@ -1,6 +1,6 @@
 import { stringifySorted, window, withResolvers } from '../lib/std.js'
 
-import { microtask, untrack } from '../lib/reactive.js'
+import { untrack } from '../lib/reactive.js'
 
 import { diff } from './string.js'
 import { addAdoptedStyleSheet, css } from './css.js'
@@ -16,13 +16,15 @@ let num = 1
  * `expect` function to make assertions.
  *
  * @param {string} title - The title of the test case.
- * @param {(expect: (arg: unknown) => Expect) => void} fn - The test
- *   function containing assertions.
+ * @param {(
+ * 	expect: (arg: unknown) => Expect,
+ * ) => void | Promise<unknown>} fn
+ *   - The test function containing assertions.
+ *
  * @param {boolean} [stopTesting] - If true, no more tests will be run
  *   after this one.
- * @returns {Promise<unknown> | undefined} A promise that resolves
- *   when all assertions in the test pass, or rejects if any assertion
- *   fails.
+ * @returns {Promise<unknown>} A promise that resolves when all
+ *   assertions in the test pass, or rejects if any assertion fails.
  */
 export function test(title, fn, stopTesting) {
 	if (!stop) {
@@ -33,12 +35,17 @@ export function test(title, fn, stopTesting) {
 		const promises = []
 
 		try {
-			fn(expect.bind(null, title, { value: 1 }, promises))
+			const result = fn(
+				expect.bind(null, title, { value: 1 }, promises),
+			)
+			if (result && result.then) promises.push(result)
 		} catch (e) {
 			error(title, e)
 		}
 
 		return Promise.all(promises)
+	} else {
+		return Promise.resolve()
 	}
 }
 
@@ -55,7 +62,7 @@ test.reset = () => {
  * @param {unknown} value
  * @returns {Expect}
  */
-export function expect(title, num, promises, value) {
+function expect(title, num, promises, value) {
 	const test = {
 		toBe: expected =>
 			pass(
@@ -75,6 +82,42 @@ export function expect(title, num, promises, value) {
 					promises,
 				),
 			),
+		toInclude: expected =>
+			untrack(() =>
+				pass(
+					true,
+					/** @type {string | any[]} */ (value)?.includes(expected),
+					true,
+					title + ' (' + num.value++ + ')',
+					promises,
+				),
+			),
+		toThrow: () =>
+			untrack(() => {
+				let threw = true
+				try {
+					const fn = /** @type {Function} */ (value)
+					fn()
+					threw = false
+				} catch {}
+				return pass(
+					true,
+					threw,
+					true,
+					title + ' (' + num.value++ + ')',
+					promises,
+				)
+			}),
+		toMatch: expected =>
+			pass(
+				true,
+				/** @type {RegExp} */ (expected).test(
+					/** @type {string} */ (value),
+				),
+				true,
+				title + ' (' + num.value++ + ')',
+				promises,
+			),
 		not: {
 			toBe: expected =>
 				pass(
@@ -93,6 +136,42 @@ export function expect(title, num, promises, value) {
 						title + ' (' + num.value++ + ')',
 						promises,
 					),
+				),
+			toInclude: expected =>
+				untrack(() =>
+					pass(
+						true,
+						/** @type {string | any[]} */ (value)?.includes(expected),
+						false,
+						title + ' (' + num.value++ + ')',
+						promises,
+					),
+				),
+			toThrow: () =>
+				untrack(() => {
+					let threw = true
+					try {
+						const fn = /** @type {Function} */ (value)
+						fn()
+						threw = false
+					} catch {}
+					return pass(
+						true,
+						threw,
+						false,
+						title + ' (' + num.value++ + ')',
+						promises,
+					)
+				}),
+			toMatch: expected =>
+				pass(
+					true,
+					/** @type {RegExp} */ (expected).test(
+						/** @type {string} */ (value),
+					),
+					false,
+					title + ' (' + num.value++ + ')',
+					promises,
 				),
 		},
 	}
@@ -117,7 +196,14 @@ function pass(expected, value, equals, title, promises) {
 	promises.push(promise)
 	if (expected !== value && equals) {
 		const [expectedPrt, valuePrt] = diff(expected, value)
-		error(title, ' expected `', expectedPrt, '` got `', valuePrt, '`')
+		error(
+			title,
+			' expected `',
+			expectedPrt,
+			'`' + (expectedPrt === '' ? '(empty)' : '') + ' got `',
+			valuePrt,
+			'`' + (valuePrt === '' ? '(empty)' : ''),
+		)
 		reject({ title, expected, value })
 	} else if (expected === value && !equals) {
 		error(title, ' expected to be different `', value, '`')
@@ -126,8 +212,6 @@ function pass(expected, value, equals, title, promises) {
 		resolve({ title, expected, value })
 	}
 
-	// to hide the promise error in case they dont catch it
-	microtask(() => promise.catch(() => {}))
 	return promise
 }
 
@@ -157,9 +241,10 @@ window.Proxy = new Proxy(Proxy, {
  * Returns true if value is a proxy. This is defined for
  * debugging/testing purposes.
  *
- * @param {object} value
+ * @param {unknown} value
  */
-export const isProxy = value => proxies.has(value)
+export const isProxy = value =>
+	proxies.has(/** @type {object} */ (value))
 
 /**
  * Injects a temporary stylesheet that highlights DOM nodes whenever
@@ -183,3 +268,154 @@ export const rerenders = () =>
 			}
 		`,
 	)
+
+/** Returns `document.body.innerHTML` trimmed. */
+export const body = () => document.body.innerHTML.trim()
+
+/** Returns `document.head.innerHTML` trimmed. */
+export const head = () => document.head.innerHTML.trim()
+
+/**
+ * Returns the number of child nodes of a given node, defaulting to
+ * `document.body`.
+ *
+ * @param {Node} [node] - The parent node to inspect.
+ * @returns {number} The child node count.
+ */
+export const childNodes = (node = document.body) =>
+	node.childNodes.length
+
+/**
+ * Waits one microtask (`Promise.resolve()`).
+ *
+ * @returns {Promise<void>}
+ */
+export const microtask = () => Promise.resolve()
+
+/**
+ * Waits one macrotask (`setTimeout(0)`).
+ *
+ * @returns {Promise<void>}
+ */
+export const macrotask = () =>
+	new Promise(resolve => setTimeout(resolve, 0))
+
+/**
+ * Waits for the given number of milliseconds.
+ *
+ * @param {number} [ms] - Delay in milliseconds (defaults to 0).
+ * @returns {Promise<void>}
+ */
+export const sleep = (ms = 0) =>
+	new Promise(resolve => setTimeout(resolve, ms))
+
+/**
+ * Centralized "long" sleep for router/location tests that need to
+ * wait longer than a macrotask — e.g. `history.back()`, delayed
+ * navigation, `Navigate` with `replace`, `useBeforeLeave`. Tuning
+ * this single constant is enough to retime every flaky wait.
+ *
+ * @returns {Promise<void>}
+ */
+export const sleepLong = () => sleep(300)
+
+/**
+ * Walks past descendant/combinator boundaries (` `, `>`, `+`, `~`, `,`)
+ * to the final compound selector — e.g. `'div input[name="x"]'`
+ * → `'input[name="x"]'`, `'a, b > c'` → `'c'`.
+ *
+ * @template {string} S
+ * @typedef {S extends `${string} ${infer R}`
+ * 	? LastCompound<R>
+ * 	: S extends `${string}>${infer R}`
+ * 		? LastCompound<R>
+ * 		: S extends `${string}+${infer R}`
+ * 			? LastCompound<R>
+ * 			: S extends `${string}~${infer R}`
+ * 				? LastCompound<R>
+ * 				: S extends `${string},${infer R}`
+ * 					? LastCompound<R>
+ * 					: S} LastCompound
+ */
+
+/**
+ * Extracts the tag portion of a compound selector — everything before
+ * the first `[`, `.`, `#`, or `:`. `'input[name="x"]'` → `'input'`,
+ * `'button.primary'` → `'button'`, `'input'` → `'input'`.
+ *
+ * @template {string} S
+ * @typedef {S extends `${infer T}[${string}`
+ * 	? T
+ * 	: S extends `${infer T}.${string}`
+ * 		? T
+ * 		: S extends `${infer T}#${string}`
+ * 			? T
+ * 			: S extends `${infer T}:${string}`
+ * 				? T
+ * 				: S} CompoundTag
+ */
+
+/**
+ * Walks the selector to its last compound, then extracts the tag.
+ * For `'div input[name="x"]'` this resolves to `'input'`; for
+ * `'.foo'` it resolves to `'.foo'` (no tag).
+ *
+ * @template {string} S
+ * @typedef {CompoundTag<LastCompound<S>>} SelectorTag
+ */
+
+/**
+ * Resolves a CSS selector string to its element type, extracting the
+ * leading tag. Falls back to `HTMLElement` when the prefix is not a
+ * known tag name (e.g. class/id-only selectors).
+ *
+ * @template {string} S
+ * @typedef {SelectorTag<S> extends keyof HTMLElementTagNameMap
+ * 	? HTMLElementTagNameMap[SelectorTag<S>]
+ * 	: SelectorTag<S> extends keyof SVGElementTagNameMap
+ * 		? SVGElementTagNameMap[SelectorTag<S>]
+ * 		: SelectorTag<S> extends keyof MathMLElementTagNameMap
+ * 			? MathMLElementTagNameMap[SelectorTag<S>]
+ * 			: HTMLElement} SelectorElement
+ */
+
+/**
+ * Shorthand for `document.querySelector`. Infers the element type from
+ * the selector's leading tag, so `$('input')`, `$('input[name="x"]')`,
+ * and `$('input.foo')` all return `HTMLInputElement | null`. Pass an
+ * explicit element type as a type parameter to override:
+ * `$<HTMLDivElement>('.my-class')`.
+ *
+ * @type {{
+ * 	<S extends string>(
+ * 		selector: S,
+ * 		node?: Document | HTMLElement,
+ * 	): SelectorElement<S> | null
+ * 	<E extends Element = HTMLElement>(
+ * 		selector: string,
+ * 		node?: Document | HTMLElement,
+ * 	): E | null
+ * }}
+ */
+export const $ = (selector, node) =>
+	(node || document).querySelector(selector)
+
+/**
+ * Shorthand for `document.querySelectorAll`, spread into an array so
+ * callers get `Array` methods (`map`, `filter`, etc.). Infers the
+ * element type from the selector's leading tag (see `$`).
+ *
+ * @type {{
+ * 	<S extends string>(
+ * 		selector: S,
+ * 		node?: Document | HTMLElement,
+ * 	): SelectorElement<S>[]
+ * 	<E extends Element = HTMLElement>(
+ * 		selector: string,
+ * 		node?: Document | HTMLElement,
+ * 	): E[]
+ * }}
+ */
+export const $$ = (selector, node) => [
+	...(node || document).querySelectorAll(selector),
+]

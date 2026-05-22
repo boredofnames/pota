@@ -5,6 +5,15 @@ import { setElementStyle } from '../core/props/style.js'
 import { addEvent } from '../lib/reactive.js'
 import { empty, entries, hasOwn, isArray } from '../lib/std.js'
 
+/**
+ * Returns `true` when the element is disabled, either directly or
+ * via an ancestor `<fieldset disabled>`.
+ *
+ * @param {Element} node
+ * @returns {boolean}
+ */
+export const isDisabled = node => node.matches(':disabled')
+
 export function focusNextInput(node, e) {
 	const { form } = node
 	if (form) {
@@ -75,12 +84,12 @@ export function object2form(form, object) {
 
 propsPlugin('use:click-focus-children-input', (node, propValue) => {
 	addEvent(node, 'click', e => {
-		node
-			.querySelector(
+		const focusable = /** @type {HTMLElement | null} */ (
+			node.querySelector(
 				'input:not([type=hidden]), button, select, textarea, [contenteditable]',
 			)
-			// @ts-expect-error
-			?.focus()
+		)
+		focusable?.focus()
 	})
 })
 
@@ -113,9 +122,9 @@ propsPlugin('use:size-to-input', (node, propValue) => {
 		const { parentNode, scrollHeight } = node
 
 		const size =
-			scrollHeight > parentNode.clientHeight
+			scrollHeight > /** @type {Element} */ (parentNode).clientHeight
 				? scrollHeight
-				: parentNode.clientHeight
+				: /** @type {Element} */ (parentNode).clientHeight
 
 		setElementStyle(node, 'height', 'auto')
 		setElementStyle(node, 'height', size + 'px')
